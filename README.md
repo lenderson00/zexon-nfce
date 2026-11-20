@@ -513,4 +513,11 @@ Portal Nacional da NF-e (nfe.fazenda.gov.br):
 
 ## Licença
 
-MIT
+Copyright (C) 2026 Lenderson Macedo.
+
+**Licenciamento duplo** — escolha uma:
+
+- **[AGPL-3.0](LICENSE)**: uso livre, inclusive comercial, desde que a aplicação que usa a biblioteca (inclusive acessada pela rede: PDV, ERP, API, SaaS) também tenha o código-fonte disponibilizado aos usuários sob a AGPL-3.0.
+- **Licença comercial**: para usar em software fechado, sem as obrigações da AGPL. Veja [COPYRIGHT.md](COPYRIGHT.md).
+
+Versões anteriores ao commit `13ee9c4` foram publicadas sob MIT.

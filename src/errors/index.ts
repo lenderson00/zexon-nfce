@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 Lenderson Macedo — licença comercial disponível (ver COPYRIGHT.md).
 /** Erro base da biblioteca. */
 export class NfceError extends Error {
   constructor(message: string, public readonly code = 'NFCE_ERROR') {

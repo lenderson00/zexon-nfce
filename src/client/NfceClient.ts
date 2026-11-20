@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 Lenderson Macedo — licença comercial disponível (ver COPYRIGHT.md).
 import type { Ambiente, Certificado, Csc, IbsCbsItem, NotaNfce, ResponsavelTecnico, VersaoQrCode } from '../types.js';
 import { carregarCertificado, certificadoVencido, type CertificadoCarregado } from '../certificate/index.js';
 import { UF_CODIGO, parseChave, validarChave } from '../xml/chave.js';

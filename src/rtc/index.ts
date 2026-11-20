@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 Lenderson Macedo — licença comercial disponível (ver COPYRIGHT.md).
 /**
  * Reforma Tributária do Consumo (LC 214/2025) — IBS e CBS na NFC-e.
  * Regras: NT 2025.002-RTC v1.53 (grupo UB, totais W34–W60 e vItem VB01).

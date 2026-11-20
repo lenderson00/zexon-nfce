@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 Lenderson Macedo — licença comercial disponível (ver COPYRIGHT.md).
 // Gerado a partir da tabela oficial "IT 2025.002 v1.71 - cClassTrib" (Portal NF-e, publicada em 30/10/2026).
 // Contém apenas os cClassTrib permitidos em NFC-e (indNFCe = 1). Não edite manualmente: regenere a partir da planilha.
 

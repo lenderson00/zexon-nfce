@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 Lenderson Macedo — licença comercial disponível (ver COPYRIGHT.md).
 import { createHash, createSign } from 'node:crypto';
 import QRCode from 'qrcode';
 import type { Csc, VersaoQrCode } from '../types.js';

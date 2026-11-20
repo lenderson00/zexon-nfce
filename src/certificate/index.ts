@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 Lenderson Macedo — licença comercial disponível (ver COPYRIGHT.md).
 import { readFileSync } from 'node:fs';
 import forge from 'node-forge';
 import type { Certificado } from '../types.js';

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 Lenderson Macedo — licença comercial disponível (ver COPYRIGHT.md).
 import PDFDocument from 'pdfkit';
 import { XMLParser } from 'fast-xml-parser';
 import { esc } from '../util/xml.js';

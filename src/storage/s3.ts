@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 Lenderson Macedo — licença comercial disponível (ver COPYRIGHT.md).
 import type { S3Client, S3ClientConfig } from '@aws-sdk/client-s3';
 import type { Storage, TipoDocumento } from './index.js';
 import { NfceError } from '../errors/index.js';
