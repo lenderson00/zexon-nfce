@@ -12,7 +12,17 @@ import { DADOS_UF, SERVICOS_AUTORIZADOR, GERADO_EM } from './endpoints-dados.js'
  * corrija sem esperar nova versão com a opção `endpoints` do cliente.
  */
 export type Servico =
-  | 'autorizacao' | 'retAutorizacao' | 'consultaProtocolo' | 'statusServico' | 'inutilizacao' | 'recepcaoEvento';
+  | 'autorizacao' | 'retAutorizacao' | 'consultaProtocolo' | 'statusServico' | 'inutilizacao' | 'recepcaoEvento'
+  /** Só SP: registro do EPEC da NFC-e (ambiente de contingência da SEFAZ-SP). */
+  | 'epecRecepcao';
+
+/** Webservices do EPEC da NFC-e (NT 2014.003). Só a SEFAZ-SP os oferece. */
+export const EPEC_SERVICOS: Partial<Record<string, Record<Ambiente, string>>> = {
+  SP: {
+    producao: 'https://nfce.epec.fazenda.sp.gov.br/EPECws/RecepcaoEPEC.asmx',
+    homologacao: 'https://homologacao.nfce.epec.fazenda.sp.gov.br/EPECws/RecepcaoEPEC.asmx',
+  },
+};
 
 export interface EndpointsAmbiente {
   servicos: Record<Servico, string>;
@@ -34,9 +44,10 @@ export const UFS_SVRS: readonly string[] = Object.entries(DADOS_UF).filter(([, d
 function montar(uf: string, ambiente: Ambiente): EndpointsAmbiente | undefined {
   const d = (DADOS_UF as Record<string, (typeof DADOS_UF)[keyof typeof DADOS_UF]>)[uf];
   if (!d) return undefined;
-  const servicos = (SERVICOS_AUTORIZADOR as Record<string, Record<Ambiente, Record<Servico, string>>>)[d.autorizador]?.[ambiente];
+  const servicos = (SERVICOS_AUTORIZADOR as unknown as Record<string, Record<Ambiente, Partial<Record<Servico, string>>>>)[d.autorizador]?.[ambiente];
   if (!servicos) return undefined;
-  return { servicos: { ...servicos }, qrCode: d[ambiente].qrCode, urlChave: d[ambiente].urlChave, autorizador: d.autorizador };
+  const epec = EPEC_SERVICOS[uf]?.[ambiente];
+  return { servicos: { ...servicos, ...(epec ? { epecRecepcao: epec } : {}) } as Record<Servico, string>, qrCode: d[ambiente].qrCode, urlChave: d[ambiente].urlChave, autorizador: d.autorizador };
 }
 
 /** Tabela embutida por UF e ambiente. */

@@ -14,6 +14,7 @@ if (r.status === 'autorizada') await imprimir(await nfce.danfcePdf(r.xmlAutoriza
 ## Sumário
 
 - [Situação do projeto](#situação-do-projeto)
+- [Mudanças na v0.5](#mudanças-na-v05)
 - [Mudanças na v0.4](#mudanças-na-v04)
 - [Recursos](#recursos)
 - [Instalação](#instalação)
@@ -38,13 +39,14 @@ if (r.status === 'autorizada') await imprimir(await nfce.danfcePdf(r.xmlAutoriza
 
 ## Situação do projeto
 
-> **Versão 0.4 — pronta para homologação (Simples Nacional e Regime Normal com IBS/CBS), incluindo o Pará (SVRS).**
+> **Versão 0.5 — pronta para homologação (Simples Nacional e Regime Normal com IBS/CBS), incluindo o Pará (SVRS).**
 > Ainda não testada contra uma SEFAZ real; os testes usam uma SEFAZ simulada e os XSDs oficiais.
 
 | Tema | Situação |
 |---|---|
 | Emissão, consulta, cancelamento, inutilização, status | ✅ Implementado |
 | Contingência offline (`tpEmis=9`) e retransmissão | ✅ Implementado |
+| EPEC da NFC-e (`tpEmis=4`, somente SP) | ✅ Implementado a partir da NT 2014.003 — validar na homologação de SP |
 | Emissão resiliente: grava antes de enviar, retentativas, `retomar`, `processarPendentes` | ✅ Implementado |
 | Registro das notas em banco e numeração automática (Postgres incluso) | ✅ Implementado (interfaces abertas para outros bancos) |
 | QR Code v2 (com CSC) e v3 (sem CSC) | ✅ Implementado (v2 conferido com os exemplos do manual) |
@@ -56,6 +58,11 @@ if (r.status === 'autorizada') await imprimir(await nfce.danfcePdf(r.xmlAutoriza
 | IBS/CBS: diferimento, crédito presumido, monofásico (combustíveis), compras governamentais | ❌ Fora do escopo (raros ou proibidos em NFC-e) |
 | ICMS-ST (CST 10/30/70), IPI, ISSQN, Imposto Seletivo | ❌ Fora do escopo |
 | URLs das 27 UFs (serviços, QR Code, consulta) | ✅ Tabela embutida (fonte: sped-nfe) — confira no nfce.encat.org antes de produção |
+
+## Mudanças na v0.5
+
+- **EPEC da NFC-e (somente SP).** `contingencia.emitirEpec(nota)` gera a NFC-e com `tpEmis=4`, registra o EPEC (evento 110140) no ambiente de contingência da SEFAZ-SP e devolve `protocoloEpec`; `processarPendentes` transmite depois a **mesma NFC-e**. Ver [EPEC (São Paulo)](#epec-são-paulo). Novos: `registrarEpec`, `protocoloEpec`, serviço `epecRecepcao`, tipo de storage `epec`, `RegistroNota.tpEmis` aceita 4. Quem implementou `Storage` próprio precisa aceitar o tipo `epec`.
+- O DANFCE de uma NFC-e em EPEC traz a expressão exigida pela NT 2014.003, o protocolo, o motivo e a hora da contingência.
 
 ## Mudanças na v0.4
 
@@ -299,6 +306,28 @@ new NfceClient({ /* ... */ ibsCbsPadrao: { cClassTrib: '000001' } }); // tributa
 ## Contingência offline
 
 Quando a SEFAZ não responde, a NFC-e pode ser emitida offline (`tpEmis=9`) e transmitida depois. **Prazo:** a regra nacional é o fim do primeiro dia útil seguinte à emissão; algumas UFs (como o Pará) usam 24 h — confira a regra vigente. A biblioteca sinaliza o prazo, mas **agendar `processarPendentes` é obrigação de quem usa** (cron, fila, worker).
+
+### EPEC (São Paulo)
+
+Só a SEFAZ-SP oferece o **EPEC** (Evento Prévio de Emissão em Contingência) para NFC-e — NT 2014.003. Em SP a contingência offline (`tpEmis=9`) é permitida desde a Portaria SRE 40/2024; em **produção o EPEC só é ativado pela SEFAZ quando o ambiente normal de autorização está indisponível** (em homologação está sempre ativo). Fora dessas situações a SEFAZ rejeita o EPEC.
+
+```ts
+try {
+  const r = await nfce.contingencia.emitirEpec(nota, 'Internet da loja fora do ar', { referencia: pedido.id });
+  imprimir(await nfce.danfcePdf(r.xmlAssinado)); // com a expressão de EPEC e o protocolo (r.protocoloEpec)
+} catch (e) {
+  // EPEC rejeitado (ex.: 142 bloqueado): nada foi autorizado; o número e a referência foram liberados.
+  // Use emitirOffline com o mesmo `numero` (e.chave aponta a tentativa rejeitada).
+}
+// agendado: transmite a MESMA NFC-e (mesma chave) e concilia o EPEC
+await nfce.processarPendentes();
+```
+
+- A NFC-e do EPEC sai com `tpEmis=4`, `dhCont` e `xJust`; o EPEC repete IE, `dhEmi`, destinatário (se houver), `vNF` e `vICMS` — a SEFAZ rejeita divergência (467).
+- **Prazo:** passado o prazo legal sem transmitir a NFC-e, a SEFAZ **bloqueia novos EPEC** do emitente (142). `processarPendentes` sinaliza o prazo como na contingência offline.
+- Não existe cancelar o EPEC: se a venda for desfeita, autorize a NFC-e e cancele-a.
+- Falha de rede ao registrar o EPEC deixa a nota em `contingencia`; `retomar`/`processarPendentes` refazem o EPEC antes de transmitir.
+- **Conferir na homologação de SP:** o `cabeçalho nfeCabecMsg` (`versaoDados 1.00`), o namespace/SOAPAction do ASMX e o formato do QR Code do EPEC (usamos o online) foram montados a partir da NT e do sped-nfe, sem acesso ao WSDL (exige certificado).
 
 ### Três situações diferentes
 
@@ -650,10 +679,11 @@ try {
 4. Emitir com e sem CPF do consumidor.
 5. Cancelar uma nota (dentro do prazo da UF).
 6. Inutilizar uma faixa.
-7. Simular queda de rede, emitir offline e retransmitir; testar `substituirPendente` e conferir a resolução por `processarPendentes`.
-8. Derrubar o processo durante um envio e conferir que `processarPendentes()` conclui a mesma chave.
-9. Ler o QR Code impresso com o celular e conferir a consulta pública.
-10. Imprimir o DANFCE na impressora térmica real.
+7. **SP:** com `emitirEpec`, conferir o registro do EPEC (cStat 136), a transmissão da mesma chave e o DANFCE com a expressão de EPEC.
+8. Simular queda de rede, emitir offline e retransmitir; testar `substituirPendente` e conferir a resolução por `processarPendentes`.
+9. Derrubar o processo durante um envio e conferir que `processarPendentes()` conclui a mesma chave.
+10. Ler o QR Code impresso com o celular e conferir a consulta pública.
+11. Imprimir o DANFCE na impressora térmica real.
 
 ---
 

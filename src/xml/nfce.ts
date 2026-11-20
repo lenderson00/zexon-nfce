@@ -16,10 +16,10 @@ export const HOMOLOG_DEST = 'NF-E EMITIDA EM AMBIENTE DE HOMOLOGACAO - SEM VALOR
 
 export interface BuildContext {
   ambiente: Ambiente;
-  /** 1=normal, 9=contingência offline. */
-  tpEmis: 1 | 9;
+  /** 1=normal, 4=contingência EPEC (só SP), 9=contingência offline. */
+  tpEmis: 1 | 4 | 9;
   offsetMinutes: number;
-  /** Para contingência (tpEmis=9). */
+  /** Para contingência (tpEmis=4 ou 9). */
   dhCont?: Date;
   xJust?: string;
   cNF?: string;
@@ -242,8 +242,8 @@ export function montarNfce(nota: NotaNfce, ctx: BuildContext): NfceMontada {
     ind === 5 ? tag('cMunFGIBS', nota.municipioFatoGerador ?? e.endereco.codigoMunicipio) : '',
     tag('tpImp', 4), tag('tpEmis', ctx.tpEmis), tag('cDV', cDV), tag('tpAmb', tpAmb),
     tag('finNFe', 1), tag('indFinal', 1), tag('indPres', ind), tag('procEmi', 0), tag('verProc', ctx.verProc ?? nota.versaoSoftware ?? 'zexon-nfce 0.4'),
-    ctx.tpEmis === 9 ? tag('dhCont', dhFormat(ctx.dhCont ?? emissao, ctx.offsetMinutes)) : '',
-    ctx.tpEmis === 9 ? tag('xJust', sanitizeText(ctx.xJust ?? 'Contingencia off-line por indisponibilidade de comunicacao')) : '',
+    ctx.tpEmis !== 1 ? tag('dhCont', dhFormat(ctx.dhCont ?? emissao, ctx.offsetMinutes)) : '',
+    ctx.tpEmis !== 1 ? tag('xJust', sanitizeText(ctx.xJust ?? (ctx.tpEmis === 4 ? 'Contingencia EPEC por indisponibilidade do ambiente de autorizacao' : 'Contingencia off-line por indisponibilidade de comunicacao'))) : '',
   ]);
 
   const en = e.endereco;

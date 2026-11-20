@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 Lenderson Macedo — licença comercial disponível (ver COPYRIGHT.md).
 export { NfceClient, Contingencia, fusoDaUF, lerQrCode } from './client/NfceClient.js';
+export { TIPO_EPEC } from './events/index.js';
 export type { NfceClientConfig, OpcoesEmissao, PrazoContingencia, ResultadoEmissao, ResultadoConsulta, ResultadoEvento, ResultadoInutilizacao, StatusEmissao } from './client/NfceClient.js';
 export { NfceBuilder } from './builder/NfceBuilder.js';
 export * from './types.js';

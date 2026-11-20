@@ -15,7 +15,11 @@ export const SERVICO_SOAP: Record<Servico, { ns: string; action: string }> = {
   statusServico: { ns: 'NFeStatusServico4', action: 'nfeStatusServicoNF' },
   inutilizacao: { ns: 'NFeInutilizacao4', action: 'nfeInutilizacaoNF' },
   recepcaoEvento: { ns: 'NFeRecepcaoEvento4', action: 'nfeRecepcaoEvento' },
+  // EPEC da NFC-e (SP): serviço ASMX anterior ao 4.00, com cabeçalho nfeCabecMsg (NT 2014.003, item 03.7).
+  epecRecepcao: { ns: 'RecepcaoEvento', action: 'nfeRecepcaoEvento' },
 };
+
+export const EPEC_VERSAO_DADOS = '1.00';
 
 export interface TransportOptions {
   timeoutMs?: number;
@@ -32,11 +36,15 @@ export interface TransportOptions {
   fetchImpl?: (url: string, envelope: string, headers: Record<string, string>) => Promise<string>;
 }
 
-export function envelopeSoap(servico: Servico, xml: string): string {
+export function envelopeSoap(servico: Servico, xml: string, cUF?: number): string {
   const { ns } = SERVICO_SOAP[servico];
+  const cabecalho = servico === 'epecRecepcao' && cUF
+    ? `<soap12:Header><nfeCabecMsg xmlns="http://www.portalfiscal.inf.br/nfe/wsdl/${ns}"><cUF>${cUF}</cUF><versaoDados>${EPEC_VERSAO_DADOS}</versaoDados></nfeCabecMsg></soap12:Header>`
+    : '';
   return (
     `<?xml version="1.0" encoding="utf-8"?>` +
     `<soap12:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:soap12="http://www.w3.org/2003/05/soap-envelope">` +
+    cabecalho +
     `<soap12:Body><nfeDadosMsg xmlns="http://www.portalfiscal.inf.br/nfe/wsdl/${ns}">${xml}</nfeDadosMsg></soap12:Body></soap12:Envelope>`
   );
 }
@@ -68,8 +76,8 @@ export class SoapClient {
     return this.agent;
   }
 
-  async chamar(url: string, servico: Servico, xml: string): Promise<string> {
-    const envelope = envelopeSoap(servico, xml);
+  async chamar(url: string, servico: Servico, xml: string, cUF?: number): Promise<string> {
+    const envelope = envelopeSoap(servico, xml, cUF);
     const { ns, action } = SERVICO_SOAP[servico];
     const headers = {
       'Content-Type': `application/soap+xml; charset=utf-8; action="http://www.portalfiscal.inf.br/nfe/wsdl/${ns}/${action}"`,

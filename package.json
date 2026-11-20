@@ -1,6 +1,6 @@
 {
   "name": "@zexon/nfce",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "Biblioteca TypeScript para emissão e operação diária de NFC-e (modelo 65): emissão, consulta, cancelamento, inutilização, contingência offline e DANFCE.",
   "license": "AGPL-3.0-only",
   "type": "module",

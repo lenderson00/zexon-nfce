@@ -13,6 +13,8 @@ export interface DanfceOpcoes {
   larguraMm?: number;
   /** Exibe quadro "via do estabelecimento"? (não usado na via do consumidor) */
   viaConsumidor?: boolean;
+  /** Protocolo do EPEC (NFC-e tpEmis=4 ainda não autorizada): impresso no DANFCE. `NfceClient.danfce*` preenche sozinho. */
+  protocoloEpec?: string;
 }
 
 interface Dados {
@@ -24,6 +26,8 @@ interface Dados {
   pagamentos: Array<{ meio: string; valor: string }>;
   consumidor?: string;
   protocolo?: string; dhAutorizacao?: string;
+  /** Contingência (tpEmis 4/9): quando entrou e por quê. */
+  dhCont?: string; xJust?: string;
   qrCode: string; urlChave: string;
 }
 
@@ -56,6 +60,7 @@ export function extrairDadosDanfce(xml: string): Dados {
       endereco: `${en.xLgr}, ${en.nro}${en.xCpl ? ' ' + en.xCpl : ''} - ${en.xBairro}, ${en.xMun}/${en.UF}`,
     },
     numero: inf.ide.nNF, serie: inf.ide.serie, emissao: inf.ide.dhEmi, tpAmb: inf.ide.tpAmb, tpEmis: inf.ide.tpEmis,
+    dhCont: inf.ide.dhCont, xJust: inf.ide.xJust,
     itens: arr<any>(inf.det).map((d) => ({
       n: d['@nItem'], codigo: d.prod.cProd, descricao: d.prod.xProd, qtd: d.prod.qCom, un: d.prod.uCom, unit: d.prod.vUnCom, total: d.prod.vProd,
     })),
@@ -74,10 +79,17 @@ const fmtData = (iso: string) => {
 };
 const cnpjFmt = (c: string) => c.replace(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/, '$1.$2.$3/$4-$5');
 
-function avisos(d: Dados): string[] {
+function avisos(d: Dados, op: DanfceOpcoes = {}): string[] {
   const a: string[] = [];
   if (d.tpAmb === '2') a.push('EMITIDA EM AMBIENTE DE HOMOLOGAÇÃO - SEM VALOR FISCAL');
   if (d.tpEmis === '9' && !d.protocolo) a.push('EMITIDA EM CONTINGÊNCIA', 'Pendente de autorização');
+  if (d.tpEmis === '4' && !d.protocolo) {
+    // NT 2014.003 (03.1 e 03.1a-D): expressão do EPEC, protocolo do EPEC, motivo e hora da entrada em contingência.
+    a.push('DANFE impresso em contingência - DPEC regularmente recebida pela SEFAZ autorizadora');
+    if (op.protocoloEpec) a.push(`Protocolo EPEC: ${op.protocoloEpec}`);
+    if (d.xJust) a.push(`Motivo: ${d.xJust}`);
+    if (d.dhCont) a.push(`Contingência desde ${fmtData(d.dhCont)}`);
+  }
   return a;
 }
 
@@ -95,7 +107,7 @@ export async function gerarDanfceHtml(xml: string, op: DanfceOpcoes = {}): Promi
 .av{border:1px solid #000;padding:3px;margin:4px 0;font-weight:bold}img{width:36mm;height:36mm}</style></head><body>
 <div class="c b">${esc(d.emitente.nome)}</div><div class="c">CNPJ ${cnpjFmt(d.emitente.cnpj)}${d.emitente.ie ? ' IE ' + esc(d.emitente.ie) : ''}<br>${esc(d.emitente.endereco)}</div><hr>
 <div class="c b">DANFE NFC-e - Documento Auxiliar da Nota Fiscal de Consumidor Eletrônica</div>
-${avisos(d).map((a) => `<div class="av c">${esc(a)}</div>`).join('')}<hr>
+${avisos(d, op).map((a) => `<div class="av c">${esc(a)}</div>`).join('')}<hr>
 <table><tr><td>Cód</td><td>Descrição</td><td class="r">Qtd</td><td class="r">Unit</td><td class="r">Total</td></tr>${linhasItens}</table><hr>
 <table><tr><td>Qtd. total de itens</td><td class="r">${d.itens.length}</td></tr><tr><td>Valor total R$</td><td class="r">${brl(d.vProd)}</td></tr>
 ${Number(d.vDesc) ? `<tr><td>Descontos R$</td><td class="r">${brl(d.vDesc)}</td></tr>` : ''}${Number(d.vOutro) ? `<tr><td>Outras despesas R$</td><td class="r">${brl(d.vOutro)}</td></tr>` : ''}
@@ -133,7 +145,7 @@ export async function gerarDanfcePdf(xml: string, op: DanfceOpcoes = {}): Promis
     center(d.emitente.endereco);
     line();
     center('DANFE NFC-e - Documento Auxiliar da Nota Fiscal de Consumidor Eletrônica', 8, true);
-    for (const a of avisos(d)) center(a, 8, true);
+    for (const a of avisos(d, op)) center(a, 8, true);
     line();
     for (const i of d.itens) {
       doc.font('Courier').fontSize(8).text(`${i.codigo} ${i.descricao}`, M, doc.y, { width: inner });

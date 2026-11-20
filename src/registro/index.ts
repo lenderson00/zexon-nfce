@@ -6,7 +6,7 @@ import { NfceError } from '../errors/index.js';
 /**
  * Situação de uma NFC-e no registro.
  * - pendente: assinada e gravada, ainda sem resposta definitiva da SEFAZ
- * - contingencia: emitida offline (tpEmis=9), aguardando transmissão
+ * - contingencia: emitida offline (tpEmis=9) ou com EPEC registrado (tpEmis=4), aguardando transmissão
  * - substituida: nota online, de recebimento incerto, trocada por uma de contingência com **outro número**.
  *   Nunca é reenviada; `processarPendentes` só a consulta para saber o desfecho.
  * - descartada: nota online que a SEFAZ certamente não tem (nunca recebida). O número fica livre
@@ -26,7 +26,7 @@ export interface RegistroNota {
   ambiente: Ambiente;
   serie: number;
   numero: number;
-  tpEmis: 1 | 9;
+  tpEmis: 1 | 4 | 9;
   situacao: SituacaoNota;
   valor: number;
   /** dhEmi (ISO 8601). */

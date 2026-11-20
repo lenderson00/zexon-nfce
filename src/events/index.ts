@@ -8,6 +8,8 @@ import { parseChave } from '../xml/chave.js';
 
 export const TIPO_CANCELAMENTO = '110111';
 export const TIPO_CANCELAMENTO_SUBSTITUICAO = '110112';
+/** EPEC — Evento Prévio de Emissão em Contingência da NFC-e (NT 2014.003; só SP). */
+export const TIPO_EPEC = '110140';
 
 export interface EventoParams {
   chave: string;
@@ -54,6 +56,52 @@ export function detalheCancelamentoSubstituicao(p: { cOrgaoAutor: number; protoc
     `<verAplic>${esc(p.verAplic ?? 'zexon-nfce')}</verAplic><nProt>${esc(p.protocolo)}</nProt><xJust>${esc(checkJust(p.justificativa))}</xJust>` +
     `<chNFeRef>${p.chaveSubstituta}</chNFeRef>`
   );
+}
+
+export interface EpecDados {
+  cOrgaoAutor: number;
+  verAplic?: string;
+  /** dhEmi da NFC-e, idêntico ao do XML (a SEFAZ confere: rejeição 467). */
+  dhEmi: string;
+  ie: string;
+  /** Destinatário, se a NFC-e o identifica: UF + CPF, CNPJ ou idEstrangeiro. */
+  dest?: { uf: string; cpf?: string; cnpj?: string; idEstrangeiro?: string };
+  vNF: string;
+  vICMS: string;
+}
+
+/** `<detEvento>` do EPEC (NT 2014.003, 03.2): descEvento, autor, dados mínimos da NFC-e. */
+export function detalheEpec(p: EpecDados): string {
+  const d = p.dest;
+  const doc = d ? (d.cnpj ? `<CNPJ>${d.cnpj}</CNPJ>` : d.cpf ? `<CPF>${d.cpf}</CPF>` : d.idEstrangeiro ? `<idEstrangeiro>${esc(d.idEstrangeiro)}</idEstrangeiro>` : '') : '';
+  const dest = d && doc ? `<dest><UF>${d.uf}</UF>${doc}</dest>` : '';
+  return (
+    `<descEvento>EPEC</descEvento><cOrgaoAutor>${p.cOrgaoAutor}</cOrgaoAutor><tpAutor>1</tpAutor>` +
+    `<verAplic>${esc(p.verAplic ?? 'zexon-nfce')}</verAplic><dhEmi>${p.dhEmi}</dhEmi><tpNF>1</tpNF><IE>${esc(p.ie)}</IE>` +
+    `${dest}<vNF>${p.vNF}</vNF><vICMS>${p.vICMS}</vICMS>`
+  );
+}
+
+/** Extrai da NFC-e assinada (tpEmis=4) os dados que o EPEC repete: a SEFAZ exige que sejam idênticos. */
+export function extrairDadosEpec(xmlNfce: string, ufEmitente: string): Omit<EpecDados, 'cOrgaoAutor' | 'verAplic'> {
+  const pega = (re: RegExp, nome: string) => {
+    const v = re.exec(xmlNfce)?.[1];
+    if (!v) throw new ValidationError(`XML da NFC-e sem ${nome}: não é possível montar o EPEC.`, [nome]);
+    return v;
+  };
+  const dhEmi = pega(/<dhEmi>([^<]+)<\/dhEmi>/, 'dhEmi');
+  const ie = pega(/<emit>[\s\S]*?<IE>([^<]+)<\/IE>/, 'emit/IE');
+  const vNF = pega(/<ICMSTot>[\s\S]*?<vNF>([^<]+)<\/vNF>/, 'vNF');
+  const vICMS = pega(/<ICMSTot>[\s\S]*?<vICMS>([^<]+)<\/vICMS>/, 'vICMS');
+  const destXml = /<dest>([\s\S]*?)<\/dest>/.exec(xmlNfce)?.[1];
+  let dest: EpecDados['dest'];
+  if (destXml) {
+    const cnpj = /<CNPJ>(\d{14})<\/CNPJ>/.exec(destXml)?.[1];
+    const cpf = /<CPF>(\d{11})<\/CPF>/.exec(destXml)?.[1];
+    const idEstrangeiro = /<idEstrangeiro>([^<]*)<\/idEstrangeiro>/.exec(destXml)?.[1];
+    if (cnpj || cpf || idEstrangeiro) dest = { uf: ufEmitente, cnpj, cpf, idEstrangeiro };
+  }
+  return { dhEmi, ie, dest, vNF, vICMS };
 }
 
 export function envEvento(idLote: string, eventosAssinados: string[]): string {

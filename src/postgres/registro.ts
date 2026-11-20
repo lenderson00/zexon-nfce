@@ -20,7 +20,7 @@ const valorColuna = (k: string, v: unknown) => (k === 'ambiente' ? ambienteNum(v
 function deLinha(r: any): RegistroNota {
   return {
     chave: r.chave, cnpj: r.cnpj, uf: r.uf, ambiente: ambienteNome(r.ambiente), serie: Number(r.serie), numero: Number(r.numero),
-    tpEmis: Number(r.tp_emis) as 1 | 9, situacao: r.situacao, valor: Number(r.valor), emitidaEm: iso(r.emitida_em)!,
+    tpEmis: Number(r.tp_emis) as 1 | 4 | 9, situacao: r.situacao, valor: Number(r.valor), emitidaEm: iso(r.emitida_em)!,
     referencia: r.referencia, protocolo: r.protocolo, autorizadaEm: iso(r.autorizada_em), cStat: r.c_stat, xMotivo: r.x_motivo,
     tentativas: Number(r.tentativas), ultimoErro: r.ultimo_erro, chaveOriginal: r.chave_original,
     protocoloCancelamento: r.protocolo_cancelamento ?? null, canceladaEm: iso(r.cancelada_em),

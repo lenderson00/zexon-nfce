@@ -11,7 +11,7 @@ import { resolverEndpoints, type EndpointsAmbiente, type EndpointsOverride, type
 import { SoapClient, type TransportOptions } from '../sefaz/soap.js';
 import * as S from '../sefaz/services.js';
 import {
-  TIPO_CANCELAMENTO, TIPO_CANCELAMENTO_SUBSTITUICAO, detalheCancelamento, detalheCancelamentoSubstituicao, envEvento, montarEvento, montarInutilizacao,
+  TIPO_CANCELAMENTO, TIPO_CANCELAMENTO_SUBSTITUICAO, TIPO_EPEC, detalheCancelamento, detalheCancelamentoSubstituicao, detalheEpec, extrairDadosEpec, envEvento, montarEvento, montarInutilizacao,
 } from '../events/index.js';
 import { validarNota } from '../validation/index.js';
 import { NfceError, SefazError, ValidationError, CertificateError, CSTAT_INDISPONIVEL } from '../errors/index.js';
@@ -108,6 +108,8 @@ export interface ResultadoEmissao {
   totais: { valorNota: number };
   /** Em contingência: motivo da queda para offline. */
   motivoContingencia?: string;
+  /** Contingência EPEC (SP): protocolo do EPEC registrado, a imprimir no DANFCE. */
+  protocoloEpec?: string;
   /** Tentativas de envio feitas nesta chamada. */
   tentativas?: number;
   /** Notas de contingência em `processarPendentes`: tempo desde a emissão em relação ao prazo de transmissão. */
@@ -209,7 +211,7 @@ export class NfceClient {
   }
 
   private chamar(s: Servico, xml: string): Promise<string> {
-    return this.soap.chamar(this.url(s), s, xml);
+    return this.soap.chamar(this.url(s), s, xml, this.cUF);
   }
 
   // ───────────────────────── Emissão ─────────────────────────
@@ -218,20 +220,22 @@ export class NfceClient {
    * Monta, assina e gera o QR Code da nota **sem enviar**.
    * Útil para pré-visualização, testes ou para controlar o envio.
    */
-  preparar(notaOriginal: NotaNfce, opcoes: { offline?: boolean; motivoContingencia?: string; cNF?: string } = {}) {
+  preparar(notaOriginal: NotaNfce, opcoes: { offline?: boolean; epec?: boolean; motivoContingencia?: string; cNF?: string } = {}) {
     const padrao = this.config.ibsCbsPadrao;
     const nota: NotaNfce = padrao ? { ...notaOriginal, itens: notaOriginal.itens.map((it) => (it.ibsCbs ? it : { ...it, ibsCbs: padrao })) } : notaOriginal;
     validarNota(nota);
     if (nota.emitente.endereco.uf.toUpperCase() !== this.config.uf) throw new ValidationError(`UF do emitente (${nota.emitente.endereco.uf}) diferente da UF do cliente (${this.config.uf})`, ['emitente.endereco.uf']);
     this.conferirCertificado(nota.emitente.cnpj);
     const offline = !!opcoes.offline;
+    const epec = !!opcoes.epec;
+    if (epec && offline) throw new ValidationError('Use `offline` (tpEmis=9) ou `epec` (tpEmis=4), não os dois.', ['epec']);
     const agora = this.agora();
     const n: NotaNfce = {
       ...nota, emissao: nota.emissao ?? agora,
       responsavelTecnico: nota.responsavelTecnico ?? this.config.responsavelTecnico, versaoSoftware: nota.versaoSoftware ?? this.config.versaoSoftware,
     };
     const m = montarNfce(n, {
-      ambiente: this.ambiente, tpEmis: offline ? 9 : 1, offsetMinutes: this.fuso, cNF: opcoes.cNF,
+      ambiente: this.ambiente, tpEmis: epec ? 4 : offline ? 9 : 1, offsetMinutes: this.fuso, cNF: opcoes.cNF,
       dhCont: agora, xJust: opcoes.motivoContingencia,
     });
     const assinado = assinarXml(m.xml, 'infNFe', 'NFe', this.cert);
@@ -309,7 +313,7 @@ export class NfceClient {
 
   /** Grava XML (storage) e depois o registro: a chave fica fixada antes de qualquer envio. */
   private async gravarAntesDeEnviar(chave: string, xml: string, nota: NotaNfce & { numero: number },
-    o: { tpEmis: 1 | 9; referencia?: string; valor: number; dhEmi: string; chaveOriginal?: string }): Promise<void> {
+    o: { tpEmis: 1 | 4 | 9; referencia?: string; valor: number; dhEmi: string; chaveOriginal?: string }): Promise<void> {
     await this.config.storage?.salvar(o.tpEmis === 9 ? 'contingencia' : 'pendentes', chave, xml);
     const agora = agoraIso();
     await this.config.registro?.registrar({
@@ -438,6 +442,7 @@ export class NfceClient {
       if (e instanceof NfceError) e.chave = chave;
       throw e;
     }
+    if (parseChave(chave).tpEmis === 4) await this.garantirEpec(chave, xml);
     return this.transmitir(base, { tentativasAnteriores });
   }
 
@@ -512,7 +517,7 @@ export class NfceClient {
     const out: ResultadoEmissao[] = [];
     for (const chave of chaves) {
       const xml = (await st.ler('contingencia', chave)) ?? (await st.ler('pendentes', chave)) ?? '';
-      const contingencia = parseChave(chave).tpEmis === 9;
+      const contingencia = [4, 9].includes(parseChave(chave).tpEmis);
       // Prazo da contingência: avisa (alerta/vencido) mas ainda tenta transmitir.
       const dhEmi = /<dhEmi>([^<]+)<\/dhEmi>/.exec(xml)?.[1];
       const prazo = contingencia && dhEmi ? this.prazoContingencia(dhEmi) : undefined;
@@ -681,9 +686,62 @@ export class NfceClient {
   // ───────────────────────── DANFCE ─────────────────────────
 
   /** Gera o DANFCE em HTML (80 mm) a partir do XML autorizado (nfeProc) ou do assinado (contingência). */
-  danfceHtml(xml: string, opcoes?: DanfceOpcoes): Promise<string> { return gerarDanfceHtml(xml, opcoes); }
+  async danfceHtml(xml: string, opcoes?: DanfceOpcoes): Promise<string> { return gerarDanfceHtml(xml, await this.comEpec(xml, opcoes)); }
   /** Gera o DANFCE em PDF (80 mm). */
-  danfcePdf(xml: string, opcoes?: DanfceOpcoes): Promise<Buffer> { return gerarDanfcePdf(xml, opcoes); }
+  async danfcePdf(xml: string, opcoes?: DanfceOpcoes): Promise<Buffer> { return gerarDanfcePdf(xml, await this.comEpec(xml, opcoes)); }
+
+  /** Preenche `protocoloEpec` (do storage) quando o XML é de uma NFC-e em contingência EPEC. */
+  private async comEpec(xml: string, opcoes: DanfceOpcoes = {}): Promise<DanfceOpcoes> {
+    if (opcoes.protocoloEpec || !/<tpEmis>4<\/tpEmis>/.test(xml)) return opcoes;
+    const chave = /Id="NFe(\d{44})"/.exec(xml)?.[1];
+    const protocoloEpec = chave ? await this.protocoloEpec(chave) : undefined;
+    return protocoloEpec ? { ...opcoes, protocoloEpec } : opcoes;
+  }
+
+  // ───────────────────────── EPEC (só SP) ─────────────────────────
+
+  /** Protocolo do EPEC já registrado para a chave (lido do storage), se houver. */
+  async protocoloEpec(chave: string): Promise<string | undefined> {
+    const proc = await this.config.storage?.ler('epec', chave);
+    return proc ? /<nProt>(\d+)<\/nProt>/.exec(proc.slice(proc.indexOf('<retEvento')))?.[1] : undefined;
+  }
+
+  /**
+   * Registra o EPEC (evento 110140) de uma NFC-e `tpEmis=4` já assinada, no ambiente de contingência da SEFAZ-SP
+   * (NT 2014.003). Idempotente: se o EPEC já foi guardado, devolve o protocolo guardado. Sucesso = cStat 136
+   * (registrado, ainda sem NFC-e vinculada). Só SP.
+   */
+  async registrarEpec(xmlNfce: string): Promise<ResultadoEvento> {
+    if (this.config.uf !== 'SP') throw new NfceError('O EPEC de NFC-e só existe na SEFAZ-SP.', 'EPEC_UF_NAO_SUPORTADA');
+    const chave = /Id="NFe(\d{44})"/.exec(xmlNfce)?.[1];
+    if (!chave) throw new ValidationError('XML sem infNFe/@Id: informe a NFC-e assinada.', ['xml']);
+    const { cnpj, tpEmis } = this.dadosChave(chave);
+    if (tpEmis !== 4) throw new ValidationError('O EPEC só se aplica a NFC-e emitida com tpEmis=4 (posição 35 da chave).', ['chave']);
+    const guardado = await this.protocoloEpec(chave);
+    if (guardado) return { sucesso: true, cStat: '136', xMotivo: 'EPEC já registrado', protocolo: guardado };
+    const dados = extrairDadosEpec(xmlNfce, this.config.uf);
+    const ev = montarEvento({
+      chave, cnpj, ambiente: this.ambiente, tipo: TIPO_EPEC, offsetMinutes: this.fuso, cOrgao: this.cUF,
+      detalhe: detalheEpec({ ...dados, cOrgaoAutor: this.cUF, verAplic: this.config.versaoSoftware }),
+    });
+    const assinado = assinarXml(ev.xml, 'infEvento', 'evento', this.cert);
+    const r = S.parseRetEnvEvento(await this.chamar('epecRecepcao', envEvento(idLote(), [assinado])));
+    const sucesso = r.cStat === '136' || r.cStat === '135';
+    const xmlProcEvento = sucesso && r.xmlRetEvento ? S.montarProcEvento(assinado, r.xmlRetEvento) : undefined;
+    if (xmlProcEvento) await this.config.storage?.salvar('epec', chave, xmlProcEvento);
+    return { sucesso, cStat: r.cStat, xMotivo: r.xMotivo, protocolo: r.nProt, xmlProcEvento };
+  }
+
+  /** Garante o EPEC antes de transmitir a NFC-e (rej. 468 sem EPEC). Rejeição 485 = já existe EPEC: segue. */
+  private async garantirEpec(chave: string, xmlNfce: string): Promise<void> {
+    if (await this.protocoloEpec(chave)) return;
+    const r = await this.registrarEpec(xmlNfce);
+    if (!r.sucesso && r.cStat !== '485') {
+      const e = new SefazError(`EPEC não registrado (${r.cStat} ${r.xMotivo}).`, r.cStat, r.xMotivo);
+      e.chave = chave;
+      throw e;
+    }
+  }
 }
 
 /** Rotinas de contingência offline (tpEmis=9). */
@@ -771,6 +829,64 @@ export class Contingencia {
     return {
       status: 'contingencia', chave: p.chave, numero: n.numero, serie: n.serie, cStat: '', xMotivo: 'Emitida em contingência offline; pendente de transmissão',
       xmlAssinado: p.xmlAssinado, qrCode: p.qrCode, urlChave: p.urlChave, totais: { valorNota: p.totais.vNF }, motivoContingencia: motivo,
+    };
+  }
+
+  /**
+   * Emite em contingência **EPEC** (tpEmis=4, só SP): gera a NFC-e, grava, registra o EPEC (evento 110140) no ambiente
+   * de contingência da SEFAZ-SP e devolve `status: 'contingencia'` com `protocoloEpec` (imprima o DANFCE com a expressão
+   * de EPEC). A NFC-e é transmitida depois por `processarPendentes`, **com a mesma chave** (prazo legal; vencido, a SEFAZ
+   * bloqueia novos EPEC do emitente).
+   *
+   * Em produção a SEFAZ-SP só aceita EPEC quando o ambiente normal está indisponível; fora disso rejeita. Rejeição
+   * definitiva: nada foi autorizado, o número volta a ficar livre (`rejeitada`) e a referência é liberada — use
+   * `emitirOffline` com o mesmo `numero`. Falha de rede: a nota fica `contingencia` e o EPEC é refeito por
+   * `retomar`/`processarPendentes`.
+   */
+  async emitirEpec(
+    nota: NotaNfce,
+    motivo = 'Contingencia EPEC: ambiente normal de autorizacao indisponivel',
+    opcoes: OpcoesEmissao = {},
+  ): Promise<ResultadoEmissao> {
+    const c = this.client;
+    if (c.config.uf !== 'SP') throw new NfceError('O EPEC de NFC-e só existe na SEFAZ-SP.', 'EPEC_UF_NAO_SUPORTADA');
+    const st = this.storage;
+    const reg = c.config.registro;
+    if (opcoes.referencia && reg) {
+      const existente = await reg.buscarPorReferencia(fmt.onlyDigits(nota.emitente.cnpj), c.ambiente, opcoes.referencia);
+      if (existente) return c.resultadoDoRegistro(existente, { semRede: true });
+    }
+    const n = await c.numerar(nota);
+    const p = c.preparar(n, { epec: true, motivoContingencia: motivo });
+    await st.salvar('contingencia', p.chave, p.xmlAssinado);
+    const agora = agoraIso();
+    await reg?.registrar({
+      chave: p.chave, cnpj: fmt.onlyDigits(n.emitente.cnpj), uf: c.config.uf, ambiente: c.ambiente, serie: n.serie, numero: n.numero,
+      tpEmis: 4, situacao: 'contingencia', valor: p.totais.vNF, emitidaEm: p.dhEmi, referencia: opcoes.referencia ?? null,
+      tentativas: 0, criadaEm: agora, atualizadaEm: agora,
+    });
+    let r: ResultadoEvento;
+    try {
+      r = await c.registrarEpec(p.xmlAssinado);
+    } catch (e) {
+      await reg?.atualizar(p.chave, { ultimoErro: (e as Error).message.slice(0, 500) }).catch(() => {});
+      if (e instanceof NfceError) e.chave = p.chave;
+      throw e;
+    }
+    if (!r.sucesso) {
+      await st.remover('contingencia', p.chave);
+      await st.salvar('rejeitadas', p.chave, p.xmlAssinado);
+      await reg?.atualizar(p.chave, { situacao: 'rejeitada', referencia: null, cStat: r.cStat, xMotivo: r.xMotivo });
+      const e = new SefazError(`EPEC rejeitado pela SEFAZ-SP (${r.cStat} ${r.xMotivo}).`, r.cStat, r.xMotivo);
+      e.chave = p.chave;
+      throw e;
+    }
+    const xMotivo = `Emitida em contingência EPEC (protocolo ${r.protocolo ?? 's/n'}); pendente de transmissão da NFC-e`;
+    await reg?.atualizar(p.chave, { cStat: r.cStat, xMotivo });
+    return {
+      status: 'contingencia', chave: p.chave, numero: n.numero, serie: n.serie, cStat: r.cStat, xMotivo,
+      xmlAssinado: p.xmlAssinado, qrCode: p.qrCode, urlChave: p.urlChave, totais: { valorNota: p.totais.vNF }, motivoContingencia: motivo,
+      protocoloEpec: r.protocolo,
     };
   }
 

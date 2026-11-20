@@ -6,8 +6,9 @@ import { join } from 'node:path';
 /**
  * - pendentes: assinadas e ainda sem resposta definitiva da SEFAZ
  * - substituidas: notas online que deram lugar a uma de contingência (guardadas para conferência)
+ * - epec: evento prévio de emissão em contingência (procEventoNFe) registrado na SEFAZ-SP
  */
-export type TipoDocumento = 'autorizadas' | 'cancelamentos' | 'inutilizacoes' | 'contingencia' | 'rejeitadas' | 'pendentes' | 'substituidas';
+export type TipoDocumento = 'autorizadas' | 'cancelamentos' | 'inutilizacoes' | 'contingencia' | 'rejeitadas' | 'pendentes' | 'substituidas' | 'epec';
 
 /** Interface de persistência de XMLs. Implemente para S3, banco, etc. */
 export interface Storage {

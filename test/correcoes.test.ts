@@ -67,7 +67,7 @@ describe('item 1 — endpoints de todas as UFs, incluindo o Pará', () => {
     for (const uf of Object.keys(ENDPOINTS)) {
       for (const amb of ['homologacao', 'producao'] as const) {
         const e = resolverEndpoints(uf, amb);
-        expect(Object.values(e.servicos)).toHaveLength(6);
+        expect(Object.values(e.servicos)).toHaveLength(uf === 'SP' ? 7 : 6); // SP também tem o EPEC da NFC-e
         for (const u of Object.values(e.servicos)) expect(u, `${uf} ${amb}`).toMatch(/^https:\/\//);
         expect(e.qrCode, `${uf} ${amb}`).toMatch(/^https?:\/\//);
         expect(e.urlChave.length, `${uf} ${amb} urlChave`).toBeGreaterThanOrEqual(21);
