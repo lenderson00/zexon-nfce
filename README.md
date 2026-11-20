@@ -92,7 +92,7 @@ const nfce = new NfceClient({
   ambiente: 'homologacao',                       // 'producao' quando estiver pronto
   certificado: { pfx: readFileSync('certificado.pfx'), senha: process.env.CERT_SENHA! },
   csc: { id: 1, codigo: process.env.CSC! },      // sem csc => QR Code v3
-  storage: new FileStorage('./nfce-data'),
+  storage: { tipo: 's3', bucket: 'minha-empresa-nfce' },
   contingenciaAutomatica: true,
 });
 
