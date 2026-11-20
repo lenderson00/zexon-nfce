@@ -40,7 +40,8 @@ const r2 = (v: number) => Math.round((v + Number.EPSILON) * 100) / 100;
 export const NFCE_LIMITE_ITENS = 990;
 
 /** Validações de negócio antes do envio. Lança ValidationError com todos os problemas. */
-export function validarNota(n: NotaNfce): void {
+export function validarNota(n: NotaNfce, opcoes: { exigirIbsCbs?: boolean } = {}): void {
+  const exigirIbsCbs = opcoes.exigirIbsCbs ?? true;
   const erros: Array<[string, string]> = [];
   const add = (campo: string, msg: string) => erros.push([campo, msg]);
   if (!cnpjValido(n.emitente.cnpj)) add('emitente.cnpj', 'CNPJ do emitente inválido');
@@ -65,6 +66,10 @@ export function validarNota(n: NotaNfce): void {
     if (it.gtin && !gtinValido(fmt.onlyDigits(it.gtin))) add(`${p}.gtin`, 'GTIN inválido (dígito verificador)');
     if (it.cest && !/^\d{7}$/.test(it.cest)) add(`${p}.cest`, 'CEST deve ter 7 dígitos');
     if (r2(it.quantidade * it.valorUnitario) - (it.desconto ?? 0) < 0) add(`${p}.desconto`, 'desconto maior que o valor do item');
+    if (exigirIbsCbs && n.emitente.regimeTributario === 3 && (n.emissao ?? new Date()).getUTCFullYear() >= 2026 && !it.ibsCbs) {
+      add(`${p}.ibsCbs`, 'obrigatório para Regime Normal (CRT 3) desde 2026 — LC 214/2025, NT 2025.002 (rejeição 1115). Informe cClassTrib ou configure ibsCbsPadrao no cliente');
+    }
+    if (it.ibsCbs && !/^\d{6}$/.test(it.ibsCbs.cClassTrib)) add(`${p}.ibsCbs.cClassTrib`, 'deve ter 6 dígitos');
     if (n.emitente.regimeTributario === 1 || n.emitente.regimeTributario === 4) {
       if (!('csosn' in it.icms)) add(`${p}.icms`, 'emitente do Simples Nacional deve usar CSOSN');
     } else if (!('cst' in it.icms)) add(`${p}.icms`, 'regime normal deve usar CST');

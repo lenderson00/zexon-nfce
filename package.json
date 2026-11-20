@@ -1,6 +1,6 @@
 {
   "name": "zexon-nfce",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Biblioteca TypeScript para emissão e operação diária de NFC-e (modelo 65): emissão, consulta, cancelamento, inutilização, contingência offline e DANFCE.",
   "license": "MIT",
   "type": "module",
@@ -9,19 +9,38 @@
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "import": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
-      "require": { "types": "./dist/index.d.cts", "default": "./dist/index.cjs" }
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
     }
   },
-  "files": ["dist", "schemas", "README.md"],
-  "engines": { "node": ">=20" },
+  "files": [
+    "dist",
+    "schemas",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "build": "tsup",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest"
   },
-  "keywords": ["nfce", "nfe", "sefaz", "nota-fiscal", "fiscal", "brasil"],
+  "keywords": [
+    "nfce",
+    "nfe",
+    "sefaz",
+    "nota-fiscal",
+    "fiscal",
+    "brasil"
+  ],
   "dependencies": {
     "fast-xml-parser": "^5.2.0",
     "node-forge": "^1.3.1",
@@ -30,6 +49,7 @@
     "xml-crypto": "^6.1.2"
   },
   "devDependencies": {
+    "@aws-sdk/client-s3": "^3.1173.0",
     "@types/node": "^22.0.0",
     "@types/node-forge": "^1.3.11",
     "@types/pdfkit": "^0.13.9",
@@ -38,5 +58,13 @@
     "typescript": "^5.7.0",
     "vitest": "^3.2.0",
     "xmllint-wasm": "^4.0.2"
+  },
+  "peerDependencies": {
+    "@aws-sdk/client-s3": "^3.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@aws-sdk/client-s3": {
+      "optional": true
+    }
   }
 }

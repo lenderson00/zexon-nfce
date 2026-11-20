@@ -20,13 +20,16 @@ export class NfceBuilder {
   responsavelTecnico(r: ResponsavelTecnico): this { this.nota.responsavelTecnico = r; return this; }
   versaoSoftware(v: string): this { this.nota.versaoSoftware = v; return this; }
 
-  /** Valida e devolve a nota. Lança `ValidationError` listando todos os problemas. */
+  /**
+   * Valida e devolve a nota. Lança `ValidationError` listando todos os problemas.
+   * A obrigatoriedade do IBS/CBS (CRT 3) é verificada no envio, pois o cliente pode aplicar `ibsCbsPadrao`.
+   */
   build(): NotaNfce {
     const n = this.nota as NotaNfce;
     if (!n.emitente) throw new Error('emitente não informado');
     n.serie ??= 1;
     if (n.numero === undefined) throw new Error('numero não informado');
-    validarNota(n);
+    validarNota(n, { exigirIbsCbs: false });
     return { ...n, itens: [...n.itens], pagamentos: [...n.pagamentos] };
   }
 }
