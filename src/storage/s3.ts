@@ -40,7 +40,7 @@ const naoEncontrado = (e: unknown) => {
  * Armazena os XMLs no Amazon S3 (ou compatível).
  *
  * ```ts
- * new S3Storage({ bucket: 'minha-empresa-nfce' })
+ * new NfceClient({ ..., storage: new S3Storage({ bucket: 'minha-empresa-nfce' }) })
  * ```
  * Chaves: `<prefixo>/<tipo>/<nome>.xml` — ex.: `nfce/autorizadas/3526...0670.xml`.
  * Permissões IAM necessárias: s3:PutObject, s3:GetObject, s3:DeleteObject e s3:ListBucket.
@@ -52,13 +52,6 @@ export class S3Storage implements Storage {
   constructor(private readonly opts: S3StorageOptions) {
     if (!opts?.bucket) throw new NfceError('S3Storage: informe `bucket`.', 'CONFIG');
     this.prefixo = (opts.prefixo ?? 'nfce').replace(/^\/+|\/+$/g, '');
-  }
-
-  /** Atalho: `S3Storage.deUrl('s3://bucket/prefixo')`. */
-  static deUrl(url: string, extra: Omit<S3StorageOptions, 'bucket' | 'prefixo'> = {}): S3Storage {
-    const m = /^s3:\/\/([^/]+)\/?(.*)$/.exec(url);
-    if (!m) throw new NfceError(`URL S3 inválida: ${url} (use s3://bucket/prefixo)`, 'CONFIG');
-    return new S3Storage({ ...extra, bucket: m[1]!, prefixo: m[2] || undefined });
   }
 
   private async s3(): Promise<{ client: S3Client; sdk: SdkS3 }> {

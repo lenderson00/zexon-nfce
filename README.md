@@ -85,14 +85,14 @@ Requisitos: Node.js 20+, certificado digital **A1** do emitente e **CSC** (se us
 
 ```ts
 import { readFileSync } from 'node:fs';
-import { NfceClient, NfceBuilder } from 'zexon-nfce';
+import { NfceClient, NfceBuilder, S3Storage } from 'zexon-nfce';
 
 const nfce = new NfceClient({
   uf: 'SP',
   ambiente: 'homologacao',                       // 'producao' quando estiver pronto
   certificado: { pfx: readFileSync('certificado.pfx'), senha: process.env.CERT_SENHA! },
   csc: { id: 1, codigo: process.env.CSC! },      // sem csc => QR Code v3
-  storage: { tipo: 's3', bucket: 'minha-empresa-nfce' },
+  storage: new S3Storage({ bucket: 'minha-empresa-nfce' }),
   contingenciaAutomatica: true,
 });
 
@@ -308,43 +308,39 @@ const html = await nfce.danfceHtml(r.xmlAutorizado!);          // inclui QR Code
 
 ## Armazenamento dos XMLs
 
-`storage` recebe um objeto de configuração — ou qualquer objeto que implemente a interface `Storage`:
+`storage` recebe qualquer objeto que implemente a interface `Storage`. A biblioteca traz três prontos:
+
+| Classe | Uso |
+|---|---|
+| `S3Storage` | Amazon S3 ou compatível — produção, vários caixas/lojas compartilhando a fila de contingência |
+| `FileStorage` | pasta local — um único servidor/PDV |
+| `MemoryStorage` | testes |
 
 ```ts
-// Amazon S3 (ou compatível)
-new NfceClient({ /* ... */ storage: { tipo: 's3', bucket: 'minha-empresa-nfce', prefixo: 'loja-01' } });
+import { S3Storage, FileStorage } from 'zexon-nfce';
 
-// Pasta local
-new NfceClient({ /* ... */ storage: { tipo: 'local', pasta: './nfce-data' } });
-
-// Memória (testes)
-new NfceClient({ /* ... */ storage: { tipo: 'memoria' } });
-
-// Implementação própria (banco de dados, outro serviço...)
-new NfceClient({ /* ... */ storage: meuStorage });
+new NfceClient({ /* ... */ storage: new S3Storage({ bucket: 'minha-empresa-nfce' }) });
+new NfceClient({ /* ... */ storage: new FileStorage('./nfce-data') });
 ```
 
-### Amazon S3 (e compatíveis)
+### S3Storage
 
 ```bash
 npm install @aws-sdk/client-s3   # dependência opcional, só para quem usa S3
 ```
 
-Opções do `{ tipo: 's3', ... }` (as mesmas da classe `S3Storage`):
-
 ```ts
-storage: { tipo: 's3', bucket: 'minha-empresa-nfce' }     // mínimo necessário
+new S3Storage({ bucket: 'minha-empresa-nfce' });          // mínimo necessário
 
-storage: {
-  tipo: 's3',
+new S3Storage({
   bucket: 'minha-empresa-nfce',
   prefixo: 'loja-01',                                     // padrão: 'nfce'
   regiao: 'sa-east-1',                                    // padrão: AWS_REGION
   credenciais: { accessKeyId, secretAccessKey },          // padrão: cadeia da AWS (env, perfil, IAM role)
-}
+});
 
 // MinIO, Cloudflare R2, DigitalOcean Spaces, Wasabi...
-storage: { tipo: 's3', bucket: 'nfce', endpoint: 'https://<conta>.r2.cloudflarestorage.com', criptografia: false }
+new S3Storage({ bucket: 'nfce', endpoint: 'https://<conta>.r2.cloudflarestorage.com', criptografia: false });
 ```
 
 - Credenciais: se não informadas, valem as variáveis `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`, o perfil `~/.aws` ou a IAM role da máquina/container.
@@ -353,17 +349,9 @@ storage: { tipo: 's3', bucket: 'nfce', endpoint: 'https://<conta>.r2.cloudflares
 - Permissões IAM mínimas: `s3:PutObject`, `s3:GetObject`, `s3:DeleteObject` e `s3:ListBucket` no bucket.
 - Dica: ative o **versionamento** do bucket e uma regra de ciclo de vida para manter os XMLs pelo prazo legal (5 anos).
 
-### Outras opções
+### Implementação própria
 
-| `tipo` | Classe equivalente | Uso |
-|---|---|---|
-| `'s3'` | `S3Storage` | produção, vários caixas/lojas compartilhando a fila de contingência |
-| `'local'` | `FileStorage` | um único servidor/PDV |
-| `'memoria'` | `MemoryStorage` | testes |
-
-As classes também podem ser instanciadas diretamente (`new S3Storage({ bucket })`) e passadas em `storage`.
-
-Tipos de documento: `autorizadas`, `cancelamentos`, `inutilizacoes`, `contingencia`, `rejeitadas`. Para banco de dados ou outro serviço, implemente:
+Para banco de dados ou outro serviço, implemente a interface. Tipos de documento: `autorizadas`, `cancelamentos`, `inutilizacoes`, `contingencia`, `rejeitadas`.
 
 ```ts
 interface Storage {
@@ -385,7 +373,7 @@ interface Storage {
 | `certificado` | `{ pfx: Buffer \| string, senha }` | A1; `pfx` aceita o conteúdo ou o caminho |
 | `csc` | `{ id, codigo }` | obrigatório para QR Code v2 |
 | `qrCodeVersao` | `2 \| 3` | padrão: 2 com CSC, 3 sem |
-| `storage` | `StorageConfig \| Storage` | `{ tipo: 's3' \| 'local' \| 'memoria', ... }` ou implementação própria; obrigatório para contingência |
+| `storage` | `Storage` | `new S3Storage({ bucket })`, `new FileStorage(pasta)`, `new MemoryStorage()` ou implementação própria; obrigatório para contingência |
 | `contingenciaAutomatica` | `boolean` | SEFAZ fora ⇒ emite offline |
 | `endpoints` | `EndpointsOverride` | URLs de serviços, QR Code e consulta |
 | `transporte` | `{ timeoutMs, ca, rejectUnauthorized, fetchImpl }` | rede/TLS; `fetchImpl` para mocks |

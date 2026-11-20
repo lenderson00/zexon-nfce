@@ -61,7 +61,7 @@ describe('NfceClient', () => {
     expect(r.xmlAutorizado).toContain('<nfeProc');
     expect(r.xmlAutorizado).toContain('<protNFe');
     expect(r.qrCode).toMatch(/\/qrcode\?p=\d{44}\|2\|2\|1\|[0-9A-F]{40}$/);
-    expect(await c.storage!.listar('autorizadas')).toEqual([r.chave]);
+    expect(await c.config.storage!.listar('autorizadas')).toEqual([r.chave]);
     // XML autorizado valida no XSD de procNFe
     const f = join(mkdtempSync(join(tmpdir(), 'nfce-')), 'p.xml');
     writeFileSync(f, r.xmlAutorizado!);
@@ -93,7 +93,7 @@ describe('NfceClient', () => {
     await expect(c.cancelar({ chave: r.chave, protocolo: '1', justificativa: 'curta' })).rejects.toThrow(/justificativa/);
     const inut = await c.inutilizar({ serie: 1, numeroInicial: 10, numeroFinal: 12, justificativa: 'Numeracao pulada por falha do sistema' });
     expect(inut.sucesso).toBe(true);
-    expect(await c.storage!.listar('inutilizacoes')).toHaveLength(1);
+    expect(await c.config.storage!.listar('inutilizacoes')).toHaveLength(1);
   });
 
   it('sem conexão: lança TransportError', async () => {
@@ -109,7 +109,7 @@ describe('NfceClient', () => {
     expect(await down.contingencia.pendentes()).toEqual([r.chave]);
 
     // Volta a conexão: reutiliza o mesmo storage.
-    const storage = down.storage!;
+    const storage = down.config.storage!;
     const up = novoCliente(sefazFake(), { storage });
     const out = await up.contingencia.transmitirPendentes();
     expect(out[0]!.status).toBe('autorizada');

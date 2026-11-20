@@ -14,8 +14,7 @@ import {
 } from '../events/index.js';
 import { validarNota } from '../validation/index.js';
 import { NfceError, SefazError, TransportError, ValidationError, CertificateError } from '../errors/index.js';
-import { FileStorage, MemoryStorage, type Storage, type StorageConfig } from '../storage/index.js';
-import { S3Storage } from '../storage/s3.js';
+import type { Storage } from '../storage/index.js';
 import { gerarDanfceHtml, gerarDanfcePdf, type DanfceOpcoes } from '../danfce/index.js';
 
 /** Fuso (minutos em relação ao UTC) por UF — o Brasil não adota horário de verão desde 2019. */
@@ -32,15 +31,8 @@ export interface NfceClientConfig {
   csc?: Csc;
   /** Versão do QR Code. Padrão: 2 se `csc` informado, senão 3. */
   qrCodeVersao?: VersaoQrCode;
-  /**
-   * Onde guardar os XMLs. Um objeto de configuração:
-   * - `{ tipo: 's3', bucket: 'minha-empresa-nfce' }` (Amazon S3 ou compatível)
-   * - `{ tipo: 'local', pasta: './nfce-data' }`
-   * - `{ tipo: 'memoria' }`
-   *
-   * ou qualquer objeto que implemente a interface `Storage` (banco de dados, outro serviço...).
-   */
-  storage?: Storage | StorageConfig;
+  /** Onde guardar os XMLs: `new S3Storage({ bucket })`, `new FileStorage(pasta)` ou sua implementação de `Storage`. */
+  storage?: Storage;
   /** Sobrescreve/complementa URLs de serviços, QR Code e consulta por chave. */
   endpoints?: EndpointsOverride;
   transporte?: TransportOptions;
@@ -119,8 +111,6 @@ export class NfceClient {
   readonly cert: CertificadoCarregado;
   readonly endpoints: EndpointsAmbiente;
   readonly contingencia: Contingencia;
-  /** Armazenamento resolvido a partir de `config.storage`. */
-  readonly storage?: Storage;
   private soap: SoapClient;
   private cUF: number;
 
@@ -133,7 +123,6 @@ export class NfceClient {
     this.cert = carregarCertificado(config.certificado);
     if (certificadoVencido(this.cert)) throw new CertificateError(`Certificado fora da validade (${this.cert.validoDe.toISOString()} – ${this.cert.validoAte.toISOString()})`);
     this.endpoints = resolverEndpoints(uf, config.ambiente, config.endpoints);
-    this.storage = resolverStorage(config.storage);
     this.soap = new SoapClient(this.cert, config.transporte);
     this.contingencia = new Contingencia(this);
   }
@@ -240,7 +229,7 @@ export class NfceClient {
   async resultadoAutorizado(base: Pick<ResultadoEmissao, 'chave' | 'numero' | 'serie' | 'qrCode' | 'urlChave' | 'totais' | 'xmlAssinado'>, cStat: string, xMotivo: string, protXml: string, xmlAssinado: string): Promise<ResultadoEmissao> {
     const xmlAutorizado = S.montarNfeProc(xmlAssinado, protXml);
     const infProt = S.parseProtocolo(protXml);
-    await this.storage?.salvar('autorizadas', base.chave, xmlAutorizado);
+    await this.config.storage?.salvar('autorizadas', base.chave, xmlAutorizado);
     return { ...base, status: 'autorizada', cStat, xMotivo, protocolo: infProt?.nProt, dataAutorizacao: infProt?.dhRecbto, xmlAutorizado };
   }
 
@@ -286,7 +275,7 @@ export class NfceClient {
   /** Cancela uma NFC-e autorizada (evento 110111). `protocolo` = número do protocolo de autorização. */
   async cancelar(p: { chave: string; protocolo: string; justificativa: string }): Promise<ResultadoEvento> {
     const r = await this.enviarEvento(p.chave, TIPO_CANCELAMENTO, detalheCancelamento(p.protocolo, p.justificativa));
-    if (r.xmlProcEvento) await this.storage?.salvar('cancelamentos', p.chave, r.xmlProcEvento);
+    if (r.xmlProcEvento) await this.config.storage?.salvar('cancelamentos', p.chave, r.xmlProcEvento);
     return r;
   }
 
@@ -296,7 +285,7 @@ export class NfceClient {
       p.chave, TIPO_CANCELAMENTO_SUBSTITUICAO,
       detalheCancelamentoSubstituicao({ cOrgaoAutor: this.cUF, protocolo: p.protocolo, justificativa: p.justificativa, chaveSubstituta: p.chaveSubstituta, verAplic: this.config.versaoSoftware }),
     );
-    if (r.xmlProcEvento) await this.storage?.salvar('cancelamentos', p.chave, r.xmlProcEvento);
+    if (r.xmlProcEvento) await this.config.storage?.salvar('cancelamentos', p.chave, r.xmlProcEvento);
     return r;
   }
 
@@ -311,7 +300,7 @@ export class NfceClient {
     const assinado = assinarXml(inut.xml, 'infInut', 'inutNFe', this.cert);
     const r = S.parseRetInutNFe(await this.chamar('inutilizacao', assinado));
     const sucesso = r.cStat === '102';
-    if (sucesso) await this.storage?.salvar('inutilizacoes', inut.id, S.montarProcInut(assinado, r.xml));
+    if (sucesso) await this.config.storage?.salvar('inutilizacoes', inut.id, S.montarProcInut(assinado, r.xml));
     return { sucesso, cStat: r.cStat, xMotivo: r.xMotivo, protocolo: r.nProt, xml: r.xml };
   }
 
@@ -323,30 +312,12 @@ export class NfceClient {
   danfcePdf(xml: string, opcoes?: DanfceOpcoes): Promise<Buffer> { return gerarDanfcePdf(xml, opcoes); }
 }
 
-const ehStorage = (s: unknown): s is Storage =>
-  !!s && typeof (s as Storage).salvar === 'function' && typeof (s as Storage).ler === 'function' &&
-  typeof (s as Storage).listar === 'function' && typeof (s as Storage).remover === 'function';
-
-/** Converte a configuração de `storage` (objeto de configuração ou implementação própria) em um Storage. */
-export function resolverStorage(s: Storage | StorageConfig | undefined): Storage | undefined {
-  if (s === undefined) return undefined;
-  if (ehStorage(s)) return s;
-  const c = s as StorageConfig;
-  switch (c.tipo) {
-    case 's3': { const { tipo: _t, ...opts } = c; return new S3Storage(opts); }
-    case 'local': return new FileStorage(c.pasta);
-    case 'memoria': return new MemoryStorage();
-    default:
-      throw new NfceError(`storage inválido: informe { tipo: 's3' | 'local' | 'memoria', ... } ou um objeto com salvar/ler/listar/remover.`, 'CONFIG');
-  }
-}
-
 /** Rotinas de contingência offline (tpEmis=9). */
 export class Contingencia {
   constructor(private client: NfceClient) {}
 
   private get storage(): Storage {
-    const s = this.client.storage;
+    const s = this.client.config.storage;
     if (!s) throw new NfceError('Contingência requer `storage` configurado (ex.: new FileStorage("./nfce-data")).', 'STORAGE_AUSENTE');
     return s;
   }

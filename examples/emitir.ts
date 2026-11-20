@@ -1,12 +1,12 @@
 import { readFileSync } from 'node:fs';
-import { NfceBuilder, NfceClient } from '../src/index.js';
+import { NfceBuilder, NfceClient, S3Storage } from '../src/index.js';
 
 const nfce = new NfceClient({
   uf: 'SP',
   ambiente: 'homologacao',
   certificado: { pfx: readFileSync(process.env.CERT_PFX!), senha: process.env.CERT_SENHA! },
   csc: { id: Number(process.env.CSC_ID), codigo: process.env.CSC! },
-  storage: { tipo: 's3', bucket: 'minha-empresa-nfce' },
+  storage: new S3Storage({ bucket: 'minha-empresa-nfce' }),
   contingenciaAutomatica: true,
 });
 
