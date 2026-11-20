@@ -19,7 +19,7 @@ if (r.status === 'autorizada') await imprimir(await nfce.danfcePdf(r.xmlAutoriza
 - [Mudanças na v0.4](#mudanças-na-v04)
 - [Recursos](#recursos)
 - [Instalação](#instalação)
-- [CLI e IAs (`nfce`, MCP, Skill)](#cli-e-ias-nfce-mcp-skill)
+- [CLI e IAs (`nfce`, Skill)](#cli-e-ias-nfce-skill)
 - [Primeiros passos](#primeiros-passos)
 - [Montando a nota](#montando-a-nota)
 - [Rotina diária (API)](#rotina-diária-api)
@@ -48,7 +48,7 @@ if (r.status === 'autorizada') await imprimir(await nfce.danfcePdf(r.xmlAutoriza
 |---|---|
 | Emissão, consulta, cancelamento, inutilização, status | ✅ Implementado |
 | Contingência offline (`tpEmis=9`) e retransmissão | ✅ Implementado |
-| CLI `nfce` para IAs, servidor MCP, Skill e JSON Schemas | ✅ Implementado (modo local: certificado na máquina) |
+| CLI `nfce` para IAs, Skill e JSON Schemas | ✅ Implementado (modo local: certificado na máquina) |
 | EPEC da NFC-e (`tpEmis=4`, somente SP) | ✅ Implementado a partir da NT 2014.003 — validar na homologação de SP |
 | Emissão resiliente: grava antes de enviar, retentativas, `retomar`, `processarPendentes` | ✅ Implementado |
 | Registro das notas em banco e numeração automática (Postgres incluso) | ✅ Implementado (interfaces abertas para outros bancos) |
@@ -64,11 +64,11 @@ if (r.status === 'autorizada') await imprimir(await nfce.danfcePdf(r.xmlAutoriza
 
 ## Mudanças na v0.6
 
-- **CLI `nfce`** (`npx @zexon/nfce ...`), feita para IAs e scripts: saída sempre em JSON, códigos de saída estáveis, erros por campo com sugestão, homologação por padrão e `--producao` obrigatório para emitir com valor fiscal. Ver [CLI e IAs](#cli-e-ias-nfce-mcp-skill).
-- **Servidor MCP** (`nfce mcp`) com as mesmas operações, **Skill** (`skills/nfce`, instalável com `nfce skill instalar`) e **JSON Schemas** do arquivo da venda e do config (`schemas/cli/`).
+- **CLI `nfce`** (`npx @zexon/nfce ...`), feita para IAs e scripts: saída sempre em JSON, códigos de saída estáveis, erros por campo com sugestão, homologação por padrão e `--producao` obrigatório para emitir com valor fiscal. Ver [CLI e IAs](#cli-e-ias-nfce-skill).
+- **Skill** (`skills/nfce`, instalável com `nfce skill instalar`) e **JSON Schemas** do arquivo da venda e do config (`schemas/cli/`).
 - `FileRegistro` e `FileNumerador`: registro e numeração em arquivo, seguros para chamadas paralelas (usados pela CLI).
 - `ValidationError.detalhes`: um `{ campo, mensagem }` por problema.
-- Novas dependências: `ajv` e `@modelcontextprotocol/sdk`.
+- Nova dependência: `ajv`.
 
 ## Mudanças na v0.5
 
@@ -123,7 +123,7 @@ Requisitos: Node.js 20+, certificado digital **A1** do emitente e **CSC** (se us
 
 ---
 
-## CLI e IAs (`nfce`, MCP, Skill)
+## CLI e IAs (`nfce`, Skill)
 
 A CLI emite **direto na SEFAZ** com o certificado A1 da máquina (modo local). Foi desenhada para agentes de IA: toda saída
 é **um JSON** com `ok` e `proximoPasso`, e o **código de saída** diz o que fazer.
@@ -156,15 +156,9 @@ Outros comandos: `previa`, `contingencia offline|epec`, `consultar`, `status`, `
 - **Estado local** em `.nfce/` (XMLs, registro, numeração e DANFCE em PDF), com `.gitignore` próprio.
 - **Segurança:** a senha do certificado e o CSC vêm de variáveis de ambiente (o config guarda só o *nome* da variável) e
   nunca aparecem na saída. Com `"ambiente": "producao"` no config, cada envio exige `--producao`.
-- **MCP:** `npx @zexon/nfce mcp` (stdio) expõe `nfce_validar`, `nfce_previa`, `nfce_emitir`, `nfce_contingencia`,
-  `nfce_pendentes`, `nfce_consultar`, `nfce_status`, `nfce_cancelar`, `nfce_danfce`, `nfce_doctor`, `nfce_schema` e
-  `nfce_exemplo`. Exemplo de configuração de cliente MCP:
-  ```json
-  { "mcpServers": { "nfce": { "command": "npx", "args": ["-y", "@zexon/nfce", "mcp"], "env": { "NFCE_CONFIG": "/caminho/nfce.config.json" } } } }
-  ```
-  (as variáveis `NFCE_CERT_SENHA`/`NFCE_CSC` devem estar no ambiente do cliente MCP.)
 - **Skill:** `npx @zexon/nfce skill instalar` copia [`skills/nfce`](skills/nfce/SKILL.md) para `.claude/skills/`,
   com o fluxo, as regras de segurança e referências (formato da venda, tributação, rejeições, contingência, cancelamento).
+- **MCP:** não incluído na lib. Agentes com terminal usam a CLI + Skill; um MCP remoto (com o certificado no servidor) está previsto como serviço da API.
 
 ## Primeiros passos
 

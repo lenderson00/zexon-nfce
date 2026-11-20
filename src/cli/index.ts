@@ -11,11 +11,6 @@ async function lerStdin(): Promise<string> {
 
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
-  if (argv[0] === 'mcp') {
-    const { iniciarMcp } = await import('./mcp.js');
-    await iniciarMcp();
-    return;
-  }
   const stdin = argv.includes('-') ? await lerStdin() : undefined;
   const { codigo, saida } = await runCli(argv, { stdin });
   // `ajuda` sai como texto para quem lê no terminal; todo o resto é JSON.

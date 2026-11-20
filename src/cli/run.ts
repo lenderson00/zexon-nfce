@@ -75,7 +75,6 @@ Comandos
   buracos [--ate N]                           números sem nota e não inutilizados
   reemitir <chave-rejeitada> <venda.json|-> [--producao]   mesmo número, nova chave
   danfce <chave> [--html] [--saida arquivo]   gera o DANFCE
-  mcp                                         servidor MCP (stdio) com as mesmas operações
   skill instalar [--destino .claude/skills]   copia a Skill para o projeto
 
 Opções globais: --config <arquivo> (padrão ./${ARQUIVO_CONFIG} ou $NFCE_CONFIG), --producao (obrigatória para enviar em produção)
@@ -466,7 +465,7 @@ function cmdExemplo(pos: string[]): ResultadoRun {
 
 /**
  * Executa a CLI sem efeitos no processo (não chama `process.exit`, não escreve no terminal).
- * Usado pelo binário, pelo servidor MCP e pelos testes.
+ * Usado pelo binário e pelos testes.
  */
 export async function runCli(argv: string[], opcoes: OpcoesRun = {}): Promise<ResultadoRun> {
   const ctx: Contexto = { cwd: opcoes.cwd ?? process.cwd(), env: opcoes.env ?? process.env, fetchImpl: opcoes.fetchImpl, relogio: opcoes.relogio };
