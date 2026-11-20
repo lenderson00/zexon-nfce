@@ -14,7 +14,7 @@ import {
 } from '../events/index.js';
 import { validarNota } from '../validation/index.js';
 import { NfceError, SefazError, TransportError, ValidationError, CertificateError } from '../errors/index.js';
-import { FileStorage, type Storage } from '../storage/index.js';
+import { FileStorage, MemoryStorage, type Storage, type StorageConfig } from '../storage/index.js';
 import { S3Storage } from '../storage/s3.js';
 import { gerarDanfceHtml, gerarDanfcePdf, type DanfceOpcoes } from '../danfce/index.js';
 
@@ -33,10 +33,14 @@ export interface NfceClientConfig {
   /** Versão do QR Code. Padrão: 2 se `csc` informado, senão 3. */
   qrCodeVersao?: VersaoQrCode;
   /**
-   * Onde guardar os XMLs: uma implementação de `Storage`, `'s3://bucket/prefixo'` (Amazon S3)
-   * ou um caminho de pasta local (ex.: `'./nfce-data'`).
+   * Onde guardar os XMLs. Um objeto de configuração:
+   * - `{ tipo: 's3', bucket: 'minha-empresa-nfce' }` (Amazon S3 ou compatível)
+   * - `{ tipo: 'local', pasta: './nfce-data' }`
+   * - `{ tipo: 'memoria' }`
+   *
+   * ou qualquer objeto que implemente a interface `Storage` (banco de dados, outro serviço...).
    */
-  storage?: Storage | string;
+  storage?: Storage | StorageConfig;
   /** Sobrescreve/complementa URLs de serviços, QR Code e consulta por chave. */
   endpoints?: EndpointsOverride;
   transporte?: TransportOptions;
@@ -319,10 +323,22 @@ export class NfceClient {
   danfcePdf(xml: string, opcoes?: DanfceOpcoes): Promise<Buffer> { return gerarDanfcePdf(xml, opcoes); }
 }
 
-/** Aceita uma implementação de Storage, uma URL `s3://bucket/prefixo` ou um caminho de pasta. */
-export function resolverStorage(s: Storage | string | undefined): Storage | undefined {
-  if (s === undefined || typeof s !== 'string') return s;
-  return s.startsWith('s3://') ? S3Storage.deUrl(s) : new FileStorage(s);
+const ehStorage = (s: unknown): s is Storage =>
+  !!s && typeof (s as Storage).salvar === 'function' && typeof (s as Storage).ler === 'function' &&
+  typeof (s as Storage).listar === 'function' && typeof (s as Storage).remover === 'function';
+
+/** Converte a configuração de `storage` (objeto de configuração ou implementação própria) em um Storage. */
+export function resolverStorage(s: Storage | StorageConfig | undefined): Storage | undefined {
+  if (s === undefined) return undefined;
+  if (ehStorage(s)) return s;
+  const c = s as StorageConfig;
+  switch (c.tipo) {
+    case 's3': { const { tipo: _t, ...opts } = c; return new S3Storage(opts); }
+    case 'local': return new FileStorage(c.pasta);
+    case 'memoria': return new MemoryStorage();
+    default:
+      throw new NfceError(`storage inválido: informe { tipo: 's3' | 'local' | 'memoria', ... } ou um objeto com salvar/ler/listar/remover.`, 'CONFIG');
+  }
 }
 
 /** Rotinas de contingência offline (tpEmis=9). */

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 Lenderson Macedo — licença comercial disponível (ver COPYRIGHT.md).
-export { NfceClient, Contingencia, fusoDaUF } from './client/NfceClient.js';
+export { NfceClient, Contingencia, fusoDaUF, resolverStorage } from './client/NfceClient.js';
 export type { NfceClientConfig, ResultadoEmissao, ResultadoConsulta, ResultadoEvento, ResultadoInutilizacao, StatusEmissao } from './client/NfceClient.js';
 export { NfceBuilder } from './builder/NfceBuilder.js';
 export * from './types.js';
@@ -18,7 +18,7 @@ export type { DanfceOpcoes } from './danfce/index.js';
 export { FileStorage, MemoryStorage } from './storage/index.js';
 export { S3Storage } from './storage/s3.js';
 export type { S3StorageOptions } from './storage/s3.js';
-export type { Storage, TipoDocumento } from './storage/index.js';
+export type { Storage, StorageConfig, TipoDocumento } from './storage/index.js';
 export * from './errors/index.js';
 export { calcularIbsCbs, aliquotasPadrao, baseIbsCbs, classTrib, CCLASSTRIB_NFCE, CST_IBSCBS } from './rtc/index.js';
 export type { ClassTrib, IndicadoresCst } from './rtc/index.js';

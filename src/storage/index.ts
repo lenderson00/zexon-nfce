@@ -42,3 +42,9 @@ export class MemoryStorage implements Storage {
   async listar(t: TipoDocumento) { return [...this.m.keys()].filter((k) => k.startsWith(`${t}/`)).map((k) => k.slice(t.length + 1)); }
   async remover(t: TipoDocumento, n: string) { this.m.delete(`${t}/${n}`); }
 }
+
+/** Configuração declarativa de armazenamento (alternativa a instanciar a classe). */
+export type StorageConfig =
+  | ({ tipo: 's3' } & import('./s3.js').S3StorageOptions)
+  | { tipo: 'local'; pasta: string }
+  | { tipo: 'memoria' };

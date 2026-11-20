@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { S3Client } from '@aws-sdk/client-s3';
 import { S3Storage } from '../src/storage/s3.js';
 import { NfceClient, resolverStorage } from '../src/client/NfceClient.js';
-import { FileStorage } from '../src/storage/index.js';
+import { FileStorage, MemoryStorage } from '../src/storage/index.js';
 import { TransportError } from '../src/errors/index.js';
 import { gerarPfxTeste, notaExemplo } from './helpers.js';
 
@@ -56,9 +56,19 @@ describe('S3Storage', () => {
     expect(objs.get('b/nfce/rejeitadas/x.xml')!.input.ServerSideEncryption).toBeUndefined();
   });
 
-  it('configuração por URL', () => {
-    expect(resolverStorage('s3://meu-bucket/clientes/123')).toBeInstanceOf(S3Storage);
-    expect(resolverStorage('./nfce-data')).toBeInstanceOf(FileStorage);
+  it('configuração por objeto', async () => {
+    expect(resolverStorage({ tipo: 's3', bucket: 'meu-bucket', prefixo: 'clientes/123' })).toBeInstanceOf(S3Storage);
+    expect(resolverStorage({ tipo: 'local', pasta: './nfce-data' })).toBeInstanceOf(FileStorage);
+    expect(resolverStorage({ tipo: 'memoria' })).toBeInstanceOf(MemoryStorage);
+    // implementação própria (ex.: banco de dados) é usada como está
+    const proprio = { salvar: async () => {}, ler: async () => undefined, listar: async () => [], remover: async () => {} };
+    expect(resolverStorage(proprio)).toBe(proprio);
+    expect(() => resolverStorage({ tipo: 'ftp' } as never)).toThrow(/storage inválido/);
+    // o cliente aceita o objeto direto
+    const { client, objs } = fakeS3();
+    const c = new NfceClient({ uf: 'SP', ambiente: 'homologacao', certificado: gerarPfxTeste(), storage: { tipo: 's3', bucket: 'nfce', client } });
+    await c.storage!.salvar('autorizadas', 'k', '<x/>');
+    expect(objs.has('nfce/nfce/autorizadas/k.xml')).toBe(true);
     expect(() => S3Storage.deUrl('http://x')).toThrow(/URL S3 inválida/);
     expect(() => new S3Storage({ bucket: '' })).toThrow(/bucket/);
   });
