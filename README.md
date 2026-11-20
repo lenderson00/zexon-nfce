@@ -1,4 +1,4 @@
-# zexon-nfce
+# @zexon/nfce
 
 Biblioteca TypeScript/Node.js para operar a **NFC-e — Nota Fiscal de Consumidor Eletrônica (modelo 65, leiaute 4.00)** no dia a dia do varejo: emitir, consultar, cancelar, inutilizar, trabalhar em contingência offline e imprimir o DANFCE.
 
@@ -96,8 +96,10 @@ Correções a partir de uma revisão da v0.3. Atenção às mudanças de comport
 ## Instalação
 
 ```bash
-npm install zexon-nfce
+npm install @zexon/nfce
 ```
+
+> Até a 0.4.0 o pacote se chamava `zexon-nfce` (não publicado no npm). A API é a mesma: basta trocar o import para `@zexon/nfce`.
 
 Requisitos: Node.js 20+, certificado digital **A1** do emitente e **CSC** (se usar QR Code v2), obtido no portal da SEFAZ da sua UF.
 
@@ -107,7 +109,7 @@ Requisitos: Node.js 20+, certificado digital **A1** do emitente e **CSC** (se us
 
 ```ts
 import { readFileSync } from 'node:fs';
-import { NfceClient, NfceBuilder, S3Storage } from 'zexon-nfce';
+import { NfceClient, NfceBuilder, S3Storage } from '@zexon/nfce';
 
 const nfce = new NfceClient({
   uf: 'SP',
@@ -365,7 +367,7 @@ const html = await nfce.danfceHtml(r.xmlAutorizado!);          // inclui QR Code
 | `MemoryStorage` | testes |
 
 ```ts
-import { S3Storage, FileStorage } from 'zexon-nfce';
+import { S3Storage, FileStorage } from '@zexon/nfce';
 
 new NfceClient({ /* ... */ storage: new S3Storage({ bucket: 'minha-empresa-nfce' }) });
 new NfceClient({ /* ... */ storage: new FileStorage('./nfce-data') });
@@ -428,7 +430,7 @@ Três peças independentes e opcionais, cada uma uma interface:
 
 ```ts
 import { Pool } from 'pg';
-import { NfceClient, S3Storage, PostgresRegistro, PostgresNumerador, criarTabelas } from 'zexon-nfce';
+import { NfceClient, S3Storage, PostgresRegistro, PostgresNumerador, criarTabelas } from '@zexon/nfce';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 await criarTabelas(pool);               // idempotente; ou use sqlMigracao() na sua ferramenta de migração
@@ -601,7 +603,7 @@ Passo a passo:
 3. Informe a cadeia:
 
 ```ts
-import { carregarCadeiaIcpBrasil } from 'zexon-nfce';
+import { carregarCadeiaIcpBrasil } from '@zexon/nfce';
 
 new NfceClient({
   // ...
@@ -690,6 +692,15 @@ npm test            # testes (a validação XSD usa o xmllint: apt install libxm
 npm run typecheck
 npm run build       # dist/ ESM + CJS + .d.ts
 ```
+
+### Publicar uma nova versão
+
+```bash
+npm version patch        # ou minor/major — cria o commit e a tag vX.Y.Z
+git push --follow-tags   # o workflow "Release" testa, compila e publica no npm
+```
+
+O workflow `.github/workflows/release.yml` usa o secret `NPM_TOKEN` do repositório (token granular do npm com escrita em `@zexon`) e publica com *provenance*. `prepublishOnly` roda typecheck, testes e build, então uma versão quebrada não sai.
 
 Exemplo de API para o Pará em homologação: `examples/emitir.ts` (lê `CERT_PFX`, `CERT_SENHA`, `CSC_ID`, `CSC`, `EMIT_CNPJ`, `EMIT_IE`, `DATABASE_URL`, `S3_BUCKET` e `SEFAZ_CA_DIR` do ambiente; requer `npm install pg`).
 

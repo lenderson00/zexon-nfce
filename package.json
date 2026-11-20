@@ -1,6 +1,6 @@
 {
-  "name": "zexon-nfce",
-  "version": "0.4.0",
+  "name": "@zexon/nfce",
+  "version": "0.4.1",
   "description": "Biblioteca TypeScript para emissão e operação diária de NFC-e (modelo 65): emissão, consulta, cancelamento, inutilização, contingência offline e DANFCE.",
   "license": "AGPL-3.0-only",
   "type": "module",
@@ -33,7 +33,8 @@
     "build": "tsup",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "prepublishOnly": "npm run typecheck && npm test && npm run build"
   },
   "keywords": [
     "nfce",
@@ -72,5 +73,16 @@
       "optional": true
     }
   },
-  "author": "Lenderson Macedo"
+  "author": "Lenderson Macedo",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lenderson00/zexon-nfce.git"
+  },
+  "homepage": "https://github.com/lenderson00/zexon-nfce#readme",
+  "bugs": {
+    "url": "https://github.com/lenderson00/zexon-nfce/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
 }
