@@ -1,0 +1,18 @@
+export { NfceClient, Contingencia, fusoDaUF } from './client/NfceClient.js';
+export type { NfceClientConfig, ResultadoEmissao, ResultadoConsulta, ResultadoEvento, ResultadoInutilizacao, StatusEmissao } from './client/NfceClient.js';
+export { NfceBuilder } from './builder/NfceBuilder.js';
+export * from './types.js';
+export { validarNota, cpfValido, cnpjValido, gtinValido } from './validation/index.js';
+export { montarChave, validarChave, parseChave, dvModulo11, UF_CODIGO } from './xml/chave.js';
+export type { UF } from './xml/chave.js';
+export { montarNfce } from './xml/nfce.js';
+export { assinarXml, verificarAssinatura } from './xml/sign.js';
+export { carregarCertificado } from './certificate/index.js';
+export { montarQrCodeOnline, montarQrCodeOffline, qrCodePng, qrCodeSvg, qrCodeDataUrl } from './qrcode/index.js';
+export { resolverEndpoints, ENDPOINTS } from './sefaz/endpoints.js';
+export type { EndpointsOverride, Servico } from './sefaz/endpoints.js';
+export { gerarDanfceHtml, gerarDanfcePdf, extrairDadosDanfce } from './danfce/index.js';
+export type { DanfceOpcoes } from './danfce/index.js';
+export { FileStorage, MemoryStorage } from './storage/index.js';
+export type { Storage, TipoDocumento } from './storage/index.js';
+export * from './errors/index.js';
