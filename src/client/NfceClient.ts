@@ -3,6 +3,7 @@
 import type { Ambiente, Certificado, Csc, IbsCbsItem, NotaNfce, ResponsavelTecnico, VersaoQrCode } from '../types.js';
 import { carregarCertificado, certificadoVencido, type CertificadoCarregado } from '../certificate/index.js';
 import { UF_CODIGO, parseChave, validarChave } from '../xml/chave.js';
+import { fmt } from '../util/xml.js';
 import { montarNfce } from '../xml/nfce.js';
 import { assinarXml, extrairDigestValue } from '../xml/sign.js';
 import { montarQrCodeOffline, montarQrCodeOnline } from '../qrcode/index.js';
@@ -13,8 +14,10 @@ import {
   TIPO_CANCELAMENTO, TIPO_CANCELAMENTO_SUBSTITUICAO, detalheCancelamento, detalheCancelamentoSubstituicao, envEvento, montarEvento, montarInutilizacao,
 } from '../events/index.js';
 import { validarNota } from '../validation/index.js';
-import { NfceError, SefazError, TransportError, ValidationError, CertificateError } from '../errors/index.js';
+import { NfceError, SefazError, ValidationError, CertificateError, CSTAT_INDISPONIVEL } from '../errors/index.js';
 import type { Storage } from '../storage/index.js';
+import { RegistroDuplicadoError, type RegistroNota, type RegistroNotas } from '../registro/index.js';
+import type { Numerador } from '../numerador/index.js';
 import { gerarDanfceHtml, gerarDanfcePdf, type DanfceOpcoes } from '../danfce/index.js';
 
 /** Fuso (minutos em relação ao UTC) por UF — o Brasil não adota horário de verão desde 2019. */
@@ -47,9 +50,30 @@ export interface NfceClientConfig {
    * Útil para emitentes do Regime Normal cujos produtos são, em geral, tributados integralmente.
    */
   ibsCbsPadrao?: IbsCbsItem;
+  /**
+   * Registro do estado das notas (banco de dados): `new PostgresRegistro(pool)` ou sua implementação de `RegistroNotas`.
+   * Exige `storage`. Habilita `referencia` (idempotência por pedido), `retomar` e `processarPendentes` com estado.
+   */
+  registro?: RegistroNotas;
+  /** Fornece o número quando a nota não informar `numero`: `new PostgresNumerador(pool)` ou sua implementação. */
+  numerador?: Numerador;
+  /** Retentativa curta para falhas temporárias (rede, SEFAZ 108/109). Padrão: 3 tentativas, esperas de 0,5 s e 1,5 s. */
+  retentativas?: { tentativas?: number; esperasMs?: number[] };
 }
 
-export type StatusEmissao = 'autorizada' | 'rejeitada' | 'denegada' | 'contingencia';
+export interface OpcoesEmissao {
+  /**
+   * Identificador do pedido/venda no seu sistema. Com `registro`, repetir `emitir` com a mesma referência
+   * devolve (ou retoma) a nota já criada, em vez de emitir outra.
+   */
+  referencia?: string;
+}
+
+/**
+ * - pendente: gravada, ainda sem resposta definitiva (falha temporária); será concluída por `retomar`/`processarPendentes`
+ * - conflito: contingência cuja nota original acabou autorizada — requer ação manual (ex.: cancelar uma delas)
+ */
+export type StatusEmissao = 'autorizada' | 'rejeitada' | 'denegada' | 'contingencia' | 'pendente' | 'cancelada' | 'conflito';
 
 export interface ResultadoEmissao {
   status: StatusEmissao;
@@ -69,7 +93,25 @@ export interface ResultadoEmissao {
   totais: { valorNota: number };
   /** Em contingência: motivo da queda para offline. */
   motivoContingencia?: string;
+  /** Tentativas de envio feitas nesta chamada. */
+  tentativas?: number;
 }
+
+type BaseResultado = Pick<ResultadoEmissao, 'chave' | 'numero' | 'serie' | 'qrCode' | 'urlChave' | 'totais' | 'xmlAssinado'>;
+
+/** Reconstrói os dados básicos do resultado a partir da chave e do XML assinado. */
+function baseDeXml(chave: string, xml: string): BaseResultado {
+  const p = parseChave(chave);
+  return {
+    chave, numero: p.nNF, serie: p.serie, xmlAssinado: xml,
+    qrCode: /<qrCode><!\[CDATA\[([^\]]*)\]\]><\/qrCode>/.exec(xml)?.[1] ?? '',
+    urlChave: /<urlChave>([^<]*)<\/urlChave>/.exec(xml)?.[1] ?? '',
+    totais: { valorNota: Number(/<vNF>([\d.]+)<\/vNF>/.exec(xml)?.[1] ?? 0) },
+  };
+}
+
+const espera = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const agoraIso = () => new Date().toISOString();
 
 export interface ResultadoConsulta {
   chave: string;
@@ -100,7 +142,6 @@ export interface ResultadoInutilizacao {
 
 const CSTAT_AUTORIZADA = ['100', '150'];
 const CSTAT_DENEGADA = ['110', '301', '302', '303'];
-const CSTAT_INDISPONIVEL = ['108', '109', '999'];
 const CSTAT_EVENTO_OK = ['135', '136', '155'];
 
 let seqLote = 0;
@@ -125,6 +166,7 @@ export class NfceClient {
     this.endpoints = resolverEndpoints(uf, config.ambiente, config.endpoints);
     this.soap = new SoapClient(this.cert, config.transporte);
     this.contingencia = new Contingencia(this);
+    if (config.registro && !config.storage) throw new NfceError('`registro` requer `storage` (onde o XML assinado é guardado).', 'CONFIG');
   }
 
   get ambiente(): Ambiente { return this.config.ambiente; }
@@ -173,32 +215,236 @@ export class NfceClient {
     const urlChave = this.endpoints.urlChave;
     const supl = `<infNFeSupl><qrCode><![CDATA[${qrCode}]]></qrCode>${urlChave ? `<urlChave>${urlChave}</urlChave>` : ''}</infNFeSupl>`;
     const xmlAssinado = assinado.replace('<Signature', `${supl}<Signature`);
-    return { chave: m.chave, xmlAssinado, qrCode, urlChave, totais: m.totais, nota: n };
+    return { chave: m.chave, xmlAssinado, qrCode, urlChave, totais: m.totais, dhEmi: m.dhEmi, nota: n };
+  }
+
+  /** Aplica padrões do cliente, valida e obtém o número (do `numerador` se a nota não trouxer). */
+  async numerar(nota: NotaNfce): Promise<NotaNfce & { numero: number }> {
+    const padrao = this.config.ibsCbsPadrao;
+    const n: NotaNfce = padrao ? { ...nota, itens: nota.itens.map((it) => (it.ibsCbs ? it : { ...it, ibsCbs: padrao })) } : nota;
+    validarNota(n);
+    if (n.numero !== undefined) return n as NotaNfce & { numero: number };
+    if (!this.config.numerador) throw new ValidationError('Informe `numero` na nota ou configure um `numerador` no cliente.', ['numero']);
+    const numero = await this.config.numerador.proximo({ cnpj: fmt.onlyDigits(n.emitente.cnpj), ambiente: this.ambiente, modelo: 65, serie: n.serie });
+    return { ...n, numero };
   }
 
   /**
-   * Emite a NFC-e (envio síncrono). Rejeições são devolvidas em `status: 'rejeitada'`;
-   * falhas de comunicação lançam `TransportError` (ou caem em contingência se `contingenciaAutomatica`).
+   * Emite a NFC-e (envio síncrono), com garantia contra perda de nota:
+   * 1. a nota é assinada e **gravada antes do envio** (`storage` + `registro`), fixando a chave;
+   * 2. falhas temporárias são repetidas (`retentativas`);
+   * 3. se ainda assim falhar, a nota fica `pendente` (ou vai para contingência) e pode ser concluída com
+   *    `retomar(chave)` / `processarPendentes()` — sem gerar outra chave.
+   *
+   * Rejeições são devolvidas em `status: 'rejeitada'`. Falhas temporárias lançam um erro com `retentavel: true` e `chave`.
    */
-  async emitir(nota: NotaNfce): Promise<ResultadoEmissao> {
+  async emitir(notaOriginal: NotaNfce, opcoes: OpcoesEmissao = {}): Promise<ResultadoEmissao> {
+    const reg = this.config.registro;
+    const cnpj = fmt.onlyDigits(notaOriginal.emitente.cnpj);
+    if (opcoes.referencia && reg) {
+      const existente = await reg.buscarPorReferencia(cnpj, this.ambiente, opcoes.referencia);
+      if (existente) return this.resultadoDoRegistro(existente);
+    }
+    const nota = await this.numerar(notaOriginal);
     const p = this.preparar(nota);
-    const base = { chave: p.chave, numero: nota.numero, serie: nota.serie, xmlAssinado: p.xmlAssinado, qrCode: p.qrCode, urlChave: p.urlChave, totais: { valorNota: p.totais.vNF } };
+    const base: BaseResultado = { chave: p.chave, numero: nota.numero, serie: nota.serie, xmlAssinado: p.xmlAssinado, qrCode: p.qrCode, urlChave: p.urlChave, totais: { valorNota: p.totais.vNF } };
     try {
-      return await this.enviarAssinada(p.xmlAssinado, base);
+      await this.gravarAntesDeEnviar(p.chave, p.xmlAssinado, nota, { tpEmis: 1, referencia: opcoes.referencia, valor: p.totais.vNF, dhEmi: p.dhEmi });
     } catch (e) {
-      if (!(e instanceof TransportError) && !(e instanceof SefazError && CSTAT_INDISPONIVEL.includes(e.cStat))) throw e;
+      // Outra requisição registrou a mesma referência ao mesmo tempo: devolve a nota dela.
+      if (e instanceof RegistroDuplicadoError && opcoes.referencia && reg) {
+        const existente = await reg.buscarPorReferencia(cnpj, this.ambiente, opcoes.referencia);
+        if (existente) return this.resultadoDoRegistro(existente);
+      }
+      throw e;
+    }
+    return this.transmitir(base, { nota, referencia: opcoes.referencia });
+  }
+
+  /** Grava XML (storage) e depois o registro: a chave fica fixada antes de qualquer envio. */
+  private async gravarAntesDeEnviar(chave: string, xml: string, nota: NotaNfce & { numero: number },
+    o: { tpEmis: 1 | 9; referencia?: string; valor: number; dhEmi: string; chaveOriginal?: string }): Promise<void> {
+    await this.config.storage?.salvar(o.tpEmis === 9 ? 'contingencia' : 'pendentes', chave, xml);
+    const agora = agoraIso();
+    await this.config.registro?.registrar({
+      chave, cnpj: fmt.onlyDigits(nota.emitente.cnpj), uf: this.config.uf, ambiente: this.ambiente, serie: nota.serie, numero: nota.numero,
+      tpEmis: o.tpEmis, situacao: o.tpEmis === 9 ? 'contingencia' : 'pendente', valor: o.valor, emitidaEm: o.dhEmi,
+      referencia: o.referencia ?? null, chaveOriginal: o.chaveOriginal ?? null, tentativas: 0, criadaEm: agora, atualizadaEm: agora,
+    });
+  }
+
+  /** Envia com retentativa; em falha temporária persistente, confirma pela consulta e decide (pendente/contingência). */
+  private async transmitir(base: BaseResultado, ctx: { nota?: NotaNfce & { numero: number }; referencia?: string; tentativasAnteriores?: number } = {}): Promise<ResultadoEmissao> {
+    const reg = this.config.registro;
+    let tentativas = 0;
+    try {
+      const r = await this.enviarComRetentativa(base, () => { tentativas++; });
+      return await this.finalizar(r, (ctx.tentativasAnteriores ?? 0) + tentativas);
+    } catch (e) {
+      if (!(e instanceof NfceError && e.retentavel)) {
+        if (e instanceof NfceError) e.chave = base.chave;
+        throw e;
+      }
       // A SEFAZ pode ter autorizado antes da queda: confirmar antes de decidir.
       try {
-        const c = await this.consultar(p.chave);
-        if (c.situacao === 'autorizada' && c.xmlProtocolo) return this.resultadoAutorizado(base, c.cStat, c.xMotivo, c.xmlProtocolo, p.xmlAssinado);
+        const c = await this.consultar(base.chave);
+        if (c.situacao === 'autorizada' && c.xmlProtocolo) {
+          const r = await this.resultadoAutorizado(base, c.cStat, c.xMotivo, c.xmlProtocolo, base.xmlAssinado);
+          return await this.finalizar(r, (ctx.tentativasAnteriores ?? 0) + tentativas);
+        }
       } catch { /* sem conectividade */ }
-      if (!this.config.contingenciaAutomatica) throw e;
-      return this.contingencia.emitirOffline(nota, `Falha de comunicacao com a SEFAZ: ${(e as Error).message}`.slice(0, 250));
+      await reg?.atualizar(base.chave, { tentativas: (ctx.tentativasAnteriores ?? 0) + tentativas, ultimoErro: (e as Error).message.slice(0, 500) }).catch(() => {});
+      if (ctx.nota && this.config.contingenciaAutomatica && this.config.storage) {
+        return this.contingencia.emitirOffline(ctx.nota, `Falha de comunicacao com a SEFAZ: ${(e as Error).message}`.slice(0, 250), {
+          referencia: ctx.referencia, chaveOriginal: base.chave,
+        });
+      }
+      e.chave = base.chave;
+      throw e;
     }
   }
 
-  /** Envia uma NFC-e já assinada (usado por emitir e pela retransmissão de contingência). */
-  async enviarAssinada(xmlAssinado: string, base: Pick<ResultadoEmissao, 'chave' | 'numero' | 'serie' | 'qrCode' | 'urlChave' | 'totais' | 'xmlAssinado'>): Promise<ResultadoEmissao> {
+  private async enviarComRetentativa(base: BaseResultado, aoTentar: () => void): Promise<ResultadoEmissao> {
+    const max = Math.max(1, this.config.retentativas?.tentativas ?? 3);
+    const esperas = this.config.retentativas?.esperasMs ?? [500, 1500, 4000];
+    for (let i = 1; ; i++) {
+      aoTentar();
+      try {
+        return { ...(await this.enviarAssinada(base.xmlAssinado, base)), tentativas: i };
+      } catch (e) {
+        if (!(e instanceof NfceError && e.retentavel) || i >= max) throw e;
+        await espera(esperas[Math.min(i - 1, esperas.length - 1)] ?? 0);
+      }
+    }
+  }
+
+  /** Atualiza storage e registro com o resultado definitivo. */
+  private async finalizar(r: ResultadoEmissao, tentativas: number): Promise<ResultadoEmissao> {
+    const st = this.config.storage;
+    if (st && r.status !== 'autorizada') await st.salvar('rejeitadas', r.chave, r.xmlAssinado);
+    if (st) { await st.remover('pendentes', r.chave); await st.remover('contingencia', r.chave); }
+    await this.config.registro?.atualizar(r.chave, {
+      situacao: r.status === 'autorizada' ? 'autorizada' : r.status === 'denegada' ? 'denegada' : 'rejeitada',
+      cStat: r.cStat, xMotivo: r.xMotivo, protocolo: r.protocolo ?? null, autorizadaEm: r.dataAutorizacao ?? null,
+      tentativas, ultimoErro: null,
+    });
+    return r;
+  }
+
+  /** Monta o resultado de uma nota já registrada (idempotência por referência). */
+  private async resultadoDoRegistro(n: RegistroNota): Promise<ResultadoEmissao> {
+    if (n.situacao === 'pendente' || n.situacao === 'contingencia') return this.retomar(n.chave);
+    const st = this.config.storage;
+    const tipo = n.situacao === 'autorizada' || n.situacao === 'cancelada' ? 'autorizadas' : n.situacao === 'substituida' ? 'substituidas' : n.situacao === 'conflito' ? 'contingencia' : 'rejeitadas';
+    const xml = (await st?.ler(tipo, n.chave)) ?? '';
+    const assinado = /<NFe[\s\S]*<\/NFe>/.exec(xml)?.[0] ?? xml;
+    const status: StatusEmissao = n.situacao === 'substituida' ? 'conflito' : n.situacao;
+    return {
+      ...baseDeXml(n.chave, assinado), status, cStat: n.cStat ?? '', xMotivo: n.xMotivo ?? '', protocolo: n.protocolo ?? undefined,
+      dataAutorizacao: n.autorizadaEm ?? undefined, xmlAutorizado: tipo === 'autorizadas' && xml ? xml : undefined,
+    };
+  }
+
+  /**
+   * Conclui uma nota gravada e ainda sem resposta definitiva (pendente ou contingência). Idempotente:
+   * consulta a chave antes e só reenvia se a SEFAZ não a conhecer. Use após uma falha temporária ou reinício.
+   */
+  async retomar(chave: string): Promise<ResultadoEmissao> {
+    const st = this.config.storage;
+    if (!st) throw new NfceError('`retomar` requer `storage` configurado.', 'STORAGE_AUSENTE');
+    const reg = this.config.registro;
+    const r0 = await reg?.buscar(chave);
+    if (r0 && r0.situacao !== 'pendente' && r0.situacao !== 'contingencia') return this.resultadoDoRegistro(r0);
+
+    const xml = (await st.ler('pendentes', chave)) ?? (await st.ler('contingencia', chave));
+    if (!xml) {
+      const aut = await st.ler('autorizadas', chave);
+      if (aut) return { ...baseDeXml(chave, aut), status: 'autorizada', cStat: '100', xMotivo: 'Autorizado o uso da NF-e', xmlAutorizado: aut };
+      throw new NfceError(`XML da nota ${chave} não encontrado no storage.`, 'XML_AUSENTE');
+    }
+    const base = baseDeXml(chave, xml);
+    const tentativasAnteriores = r0?.tentativas ?? 0;
+    try {
+      // Contingência: se a nota online original acabou autorizada, não transmitir esta (evita nota em dobro).
+      if (r0?.chaveOriginal) {
+        const o = await this.consultar(r0.chaveOriginal);
+        if (o.situacao === 'autorizada' && o.xmlProtocolo) {
+          const orig = await st.ler('substituidas', r0.chaveOriginal);
+          if (orig) await st.salvar('autorizadas', r0.chaveOriginal, S.montarNfeProc(orig, o.xmlProtocolo));
+          const motivo = `A nota original ${r0.chaveOriginal} foi autorizada; esta contingência não foi transmitida. Trate manualmente (ex.: cancelar a original e transmitir esta).`;
+          await reg!.atualizar(r0.chaveOriginal, { situacao: 'autorizada', protocolo: o.protocolo ?? null, cStat: o.cStat, xMotivo: o.xMotivo });
+          await reg!.atualizar(chave, { situacao: 'conflito', xMotivo: motivo });
+          return { ...base, status: 'conflito', cStat: '', xMotivo: motivo };
+        }
+      }
+      const c = await this.consultar(chave);
+      if (c.situacao === 'autorizada' && c.xmlProtocolo) {
+        return await this.finalizar(await this.resultadoAutorizado(base, c.cStat, c.xMotivo, c.xmlProtocolo, xml), tentativasAnteriores);
+      }
+      if (c.situacao === 'denegada') return await this.finalizar({ ...base, status: 'denegada', cStat: c.cStat, xMotivo: c.xMotivo, protocolo: c.protocolo }, tentativasAnteriores);
+    } catch (e) {
+      if (e instanceof NfceError) e.chave = chave;
+      throw e;
+    }
+    return this.transmitir(base, { tentativasAnteriores });
+  }
+
+  /**
+   * Processa notas pendentes e de contingência (mais antigas primeiro). Nunca lança: cada nota volta com seu status
+   * (`pendente`/`contingencia` com `xMotivo` do erro, se ainda não deu). Chame periodicamente (cron, fila, setInterval).
+   */
+  async processarPendentes(opcoes: { limite?: number; cnpj?: string } = {}): Promise<ResultadoEmissao[]> {
+    const st = this.config.storage;
+    if (!st) throw new NfceError('`processarPendentes` requer `storage` configurado.', 'STORAGE_AUSENTE');
+    const limite = opcoes.limite ?? 100;
+    let chaves: string[];
+    if (this.config.registro) {
+      chaves = (await this.config.registro.pendentes({ uf: this.config.uf, ambiente: this.ambiente, cnpj: opcoes.cnpj, limite })).map((n) => n.chave);
+    } else {
+      const prefixo = String(this.cUF);
+      const candidatas = [...(await st.listar('contingencia')), ...(await st.listar('pendentes'))]
+        .filter((c) => c.startsWith(prefixo) && (!opcoes.cnpj || c.slice(6, 20) === opcoes.cnpj));
+      chaves = [];
+      for (const c of candidatas) {
+        if (chaves.length >= limite) break;
+        const xml = (await st.ler('contingencia', c)) ?? (await st.ler('pendentes', c));
+        if (xml && /<tpAmb>(\d)<\/tpAmb>/.exec(xml)?.[1] === String(this.tpAmb)) chaves.push(c);
+      }
+    }
+    const out: ResultadoEmissao[] = [];
+    for (const chave of chaves) {
+      try {
+        out.push(await this.retomar(chave));
+      } catch (e) {
+        const xml = (await st.ler('contingencia', chave)) ?? (await st.ler('pendentes', chave)) ?? '';
+        const contingencia = parseChave(chave).tpEmis === 9;
+        out.push({ ...baseDeXml(chave, xml), status: contingencia ? 'contingencia' : 'pendente', cStat: (e as SefazError).cStat ?? '', xMotivo: (e as Error).message });
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Reemite uma nota **rejeitada** com a mesma série e número (evita buraco na numeração).
+   * A nota corrigida recebe nova chave; a referência do pedido passa para ela.
+   */
+  async reemitir(chave: string, notaCorrigida: NotaNfce, opcoes: OpcoesEmissao = {}): Promise<ResultadoEmissao> {
+    const reg = this.config.registro;
+    const r0 = await reg?.buscar(chave);
+    if (r0 && r0.situacao !== 'rejeitada') throw new ValidationError(`Só notas rejeitadas podem ser reemitidas com o mesmo número (situação atual: ${r0.situacao}).`, ['chave']);
+    if (!r0) {
+      const c = await this.consultar(chave);
+      if (c.situacao !== 'inexistente') throw new ValidationError(`A nota ${chave} existe na SEFAZ (${c.situacao}); não pode ser reemitida.`, ['chave']);
+    }
+    const pc = parseChave(chave);
+    if (fmt.onlyDigits(notaCorrigida.emitente.cnpj) !== pc.cnpj) throw new ValidationError('O CNPJ do emitente difere do da nota original.', ['emitente.cnpj']);
+    const referencia = opcoes.referencia ?? r0?.referencia ?? undefined;
+    if (r0?.referencia) await reg!.atualizar(chave, { referencia: null });
+    return this.emitir({ ...notaCorrigida, serie: pc.serie, numero: pc.nNF }, { referencia });
+  }
+
+  /** Envia uma NFC-e já assinada (uma tentativa). Prefira `emitir`/`retomar`, que gravam o estado. */
+  async enviarAssinada(xmlAssinado: string, base: BaseResultado): Promise<ResultadoEmissao> {
     const ret = S.parseRetEnviNFe(await this.chamar('autorizacao', S.xmlLote(idLote(), [xmlAssinado], true)));
     if (CSTAT_INDISPONIVEL.includes(ret.cStat)) throw new SefazError(`SEFAZ indisponível: ${ret.cStat} ${ret.xMotivo}`, ret.cStat, ret.xMotivo, ret);
     let prot = ret.protocolo;
@@ -208,7 +454,7 @@ export class NfceClient {
         const r = S.parseRetConsReciNFe(await this.chamar('retAutorizacao', S.xmlConsultaRecibo(this.ambiente, ret.nRec)));
         if (r.protocolo) prot = r.protocolo;
         else if (r.cStat !== '105') break;
-        else await new Promise((res) => setTimeout(res, 1500));
+        else await espera(1500);
       }
     }
     if (!prot) return this.resultado(base, 'rejeitada', ret.cStat, ret.xMotivo);
@@ -222,11 +468,11 @@ export class NfceClient {
     return this.resultado(base, 'rejeitada', prot.cStat, prot.xMotivo);
   }
 
-  private resultado(base: Pick<ResultadoEmissao, 'chave' | 'numero' | 'serie' | 'qrCode' | 'urlChave' | 'totais' | 'xmlAssinado'>, status: StatusEmissao, cStat: string, xMotivo: string, protocolo?: string): ResultadoEmissao {
+  private resultado(base: BaseResultado, status: StatusEmissao, cStat: string, xMotivo: string, protocolo?: string): ResultadoEmissao {
     return { ...base, status, cStat, xMotivo, protocolo };
   }
 
-  async resultadoAutorizado(base: Pick<ResultadoEmissao, 'chave' | 'numero' | 'serie' | 'qrCode' | 'urlChave' | 'totais' | 'xmlAssinado'>, cStat: string, xMotivo: string, protXml: string, xmlAssinado: string): Promise<ResultadoEmissao> {
+  async resultadoAutorizado(base: BaseResultado, cStat: string, xMotivo: string, protXml: string, xmlAssinado: string): Promise<ResultadoEmissao> {
     const xmlAutorizado = S.montarNfeProc(xmlAssinado, protXml);
     const infProt = S.parseProtocolo(protXml);
     await this.config.storage?.salvar('autorizadas', base.chave, xmlAutorizado);
@@ -322,13 +568,34 @@ export class Contingencia {
     return s;
   }
 
-  /** Emite em contingência offline: assina com tpEmis=9, gera QR Code offline e guarda para retransmissão. */
-  async emitirOffline(nota: NotaNfce, motivo = 'Contingencia off-line por indisponibilidade de comunicacao com a SEFAZ'): Promise<ResultadoEmissao> {
+  /**
+   * Emite em contingência offline: assina com tpEmis=9, gera QR Code offline e grava para transmissão posterior.
+   * `chaveOriginal` (uso interno): nota online que está sendo substituída; ela é preservada e não será reenviada.
+   */
+  async emitirOffline(
+    nota: NotaNfce,
+    motivo = 'Contingencia off-line por indisponibilidade de comunicacao com a SEFAZ',
+    opcoes: OpcoesEmissao & { chaveOriginal?: string } = {},
+  ): Promise<ResultadoEmissao> {
     const st = this.storage;
-    const p = this.client.preparar(nota, { offline: true, motivoContingencia: motivo });
+    const reg = this.client.config.registro;
+    const n = await this.client.numerar(nota);
+    const p = this.client.preparar(n, { offline: true, motivoContingencia: motivo });
+    if (opcoes.chaveOriginal) {
+      const orig = await st.ler('pendentes', opcoes.chaveOriginal);
+      if (orig) await st.salvar('substituidas', opcoes.chaveOriginal, orig);
+      await st.remover('pendentes', opcoes.chaveOriginal);
+      await reg?.atualizar(opcoes.chaveOriginal, { situacao: 'substituida', referencia: null });
+    }
     await st.salvar('contingencia', p.chave, p.xmlAssinado);
+    const agora = agoraIso();
+    await reg?.registrar({
+      chave: p.chave, cnpj: fmt.onlyDigits(n.emitente.cnpj), uf: this.client.config.uf, ambiente: this.client.ambiente, serie: n.serie,
+      numero: n.numero, tpEmis: 9, situacao: 'contingencia', valor: p.totais.vNF, emitidaEm: p.dhEmi, referencia: opcoes.referencia ?? null,
+      chaveOriginal: opcoes.chaveOriginal ?? null, tentativas: 0, criadaEm: agora, atualizadaEm: agora,
+    });
     return {
-      status: 'contingencia', chave: p.chave, numero: nota.numero, serie: nota.serie, cStat: '', xMotivo: 'Emitida em contingência offline; pendente de transmissão',
+      status: 'contingencia', chave: p.chave, numero: n.numero, serie: n.serie, cStat: '', xMotivo: 'Emitida em contingência offline; pendente de transmissão',
       xmlAssinado: p.xmlAssinado, qrCode: p.qrCode, urlChave: p.urlChave, totais: { valorNota: p.totais.vNF }, motivoContingencia: motivo,
     };
   }
@@ -336,38 +603,8 @@ export class Contingencia {
   /** Chaves de NFC-e em contingência ainda não transmitidas. */
   pendentes(): Promise<string[]> { return this.storage.listar('contingencia'); }
 
-  /**
-   * Retransmite as notas pendentes (prazo regulamentar: até 24 h após a emissão/ fim do problema, conforme UF).
-   * Antes de enviar, consulta a chave para evitar duplicidade.
-   */
-  async transmitirPendentes(): Promise<ResultadoEmissao[]> {
-    const st = this.storage;
-    const out: ResultadoEmissao[] = [];
-    for (const chave of await st.listar('contingencia')) {
-      const xml = await st.ler('contingencia', chave);
-      if (!xml) continue;
-      const p = parseChave(chave);
-      const base = {
-        chave, numero: p.nNF, serie: p.serie, xmlAssinado: xml,
-        qrCode: /<qrCode><!\[CDATA\[([^\]]*)\]\]><\/qrCode>/.exec(xml)?.[1] ?? '', urlChave: /<urlChave>([^<]*)<\/urlChave>/.exec(xml)?.[1] ?? '',
-        totais: { valorNota: Number(/<vNF>([\d.]+)<\/vNF>/.exec(xml)?.[1] ?? 0) },
-      };
-      try {
-        const c = await this.client.consultar(chave);
-        const r = c.situacao === 'autorizada' && c.xmlProtocolo
-          ? await this.client.resultadoAutorizado(base, c.cStat, c.xMotivo, c.xmlProtocolo, xml)
-          : await this.client.enviarAssinada(xml, base);
-        if (r.status === 'autorizada' || r.status === 'rejeitada' || r.status === 'denegada') {
-          if (r.status !== 'autorizada') await st.salvar('rejeitadas', chave, xml);
-          await st.remover('contingencia', chave);
-        }
-        out.push(r);
-      } catch (e) {
-        if (e instanceof TransportError || e instanceof SefazError) {
-          out.push({ ...base, status: 'contingencia', cStat: (e as SefazError).cStat ?? '', xMotivo: (e as Error).message });
-        } else throw e;
-      }
-    }
-    return out;
+  /** Transmite as notas pendentes e de contingência. Equivale a `client.processarPendentes()`. */
+  transmitirPendentes(opcoes: { limite?: number; cnpj?: string } = {}): Promise<ResultadoEmissao[]> {
+    return this.client.processarPendentes(opcoes);
   }
 }

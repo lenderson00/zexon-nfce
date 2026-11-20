@@ -153,9 +153,11 @@ export function montarNfce(nota: NotaNfce, ctx: BuildContext): NfceMontada {
   const emissao = nota.emissao ?? new Date();
   const dhEmi = dhFormat(emissao, ctx.offsetMinutes);
   const tpAmb = ctx.ambiente === 'producao' ? 1 : 2;
-  const cNF = ctx.cNF ?? gerarCNF(nota.numero);
+  if (nota.numero === undefined) throw new ValidationError('Número da nota não informado.', ['numero']);
+  const numero = nota.numero;
+  const cNF = ctx.cNF ?? gerarCNF(numero);
   const { chave, cDV } = montarChave({
-    cUF, emissao, offsetMinutes: ctx.offsetMinutes, cnpj: e.cnpj, serie: nota.serie, nNF: nota.numero, tpEmis: ctx.tpEmis, cNF,
+    cUF, emissao, offsetMinutes: ctx.offsetMinutes, cnpj: e.cnpj, serie: nota.serie, nNF: numero, tpEmis: ctx.tpEmis, cNF,
   });
 
   const tot: Totais = { vProd: 0, vDesc: 0, vFrete: 0, vSeg: 0, vOutro: 0, vBC: 0, vICMS: 0, vICMSDeson: 0, vPIS: 0, vCOFINS: 0, vTotTrib: 0, vNF: 0 };
@@ -224,12 +226,12 @@ export function montarNfce(nota: NotaNfce, ctx: BuildContext): NfceMontada {
   const ind = nota.indicadorPresenca ?? 1;
   const ide = group('ide', [
     tag('cUF', cUF), tag('cNF', cNF), tag('natOp', sanitizeText(nota.naturezaOperacao ?? 'VENDA AO CONSUMIDOR')), tag('mod', 65),
-    tag('serie', nota.serie), tag('nNF', nota.numero), tag('dhEmi', dhEmi), tag('tpNF', 1), tag('idDest', 1),
+    tag('serie', nota.serie), tag('nNF', numero), tag('dhEmi', dhEmi), tag('tpNF', 1), tag('idDest', 1),
     tag('cMunFG', e.endereco.codigoMunicipio),
     // B25b-60/70: cMunFGIBS é obrigatório na NFC-e com indPres=5 e proibido nos demais casos.
     ind === 5 ? tag('cMunFGIBS', nota.municipioFatoGerador ?? e.endereco.codigoMunicipio) : '',
     tag('tpImp', 4), tag('tpEmis', ctx.tpEmis), tag('cDV', cDV), tag('tpAmb', tpAmb),
-    tag('finNFe', 1), tag('indFinal', 1), tag('indPres', ind), tag('procEmi', 0), tag('verProc', ctx.verProc ?? nota.versaoSoftware ?? 'zexon-nfce 0.2'),
+    tag('finNFe', 1), tag('indFinal', 1), tag('indPres', ind), tag('procEmi', 0), tag('verProc', ctx.verProc ?? nota.versaoSoftware ?? 'zexon-nfce 0.3'),
     ctx.tpEmis === 9 ? tag('dhCont', dhFormat(ctx.dhCont ?? emissao, ctx.offsetMinutes)) : '',
     ctx.tpEmis === 9 ? tag('xJust', sanitizeText(ctx.xJust ?? 'Contingencia off-line por indisponibilidade de comunicacao')) : '',
   ]);

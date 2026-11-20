@@ -52,7 +52,7 @@ export function validarNota(n: NotaNfce, opcoes: { exigirIbsCbs?: boolean } = {}
   if (!/^\d{7}$/.test(String(n.emitente.endereco.codigoMunicipio))) add('emitente.endereco.codigoMunicipio', 'código IBGE deve ter 7 dígitos');
   if (!/^\d{8}$/.test(fmt.onlyDigits(n.emitente.endereco.cep))) add('emitente.endereco.cep', 'CEP deve ter 8 dígitos');
   if (!Number.isInteger(n.serie) || n.serie < 0 || n.serie > 889) add('serie', 'série deve estar entre 0 e 889');
-  if (!Number.isInteger(n.numero) || n.numero < 1 || n.numero > 999999999) add('numero', 'número inválido');
+  if (n.numero !== undefined && (!Number.isInteger(n.numero) || n.numero < 1 || n.numero > 999999999)) add('numero', 'número inválido');
   if (n.itens.length === 0) add('itens', 'informe ao menos 1 item');
   if (n.itens.length > NFCE_LIMITE_ITENS) add('itens', `máximo de ${NFCE_LIMITE_ITENS} itens`);
   if (n.pagamentos.length === 0) add('pagamentos', 'informe ao menos 1 forma de pagamento');

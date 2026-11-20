@@ -49,7 +49,7 @@ beforeAll(() => { pfx = gerarPfxTeste(); });
 const novoCliente = (fake: ReturnType<typeof sefazFake>, extra: Record<string, unknown> = {}) =>
   new NfceClient({
     uf: 'SP', ambiente: 'homologacao', certificado: pfx, csc: { id: 1, codigo: 'CSC-DE-TESTE-0123456789' }, storage: new MemoryStorage(),
-    transporte: { fetchImpl: fake.fetchImpl }, ...extra,
+    transporte: { fetchImpl: fake.fetchImpl }, retentativas: { esperasMs: [0] }, ...extra,
   });
 
 describe('NfceClient', () => {

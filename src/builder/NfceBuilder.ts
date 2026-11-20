@@ -9,6 +9,7 @@ export class NfceBuilder {
 
   emitente(e: Emitente): this { this.nota.emitente = e; return this; }
   serie(s: number): this { this.nota.serie = s; return this; }
+  /** Opcional: sem número, o cliente usa o `numerador` configurado. */
   numero(n: number): this { this.nota.numero = n; return this; }
   consumidor(c: Consumidor): this { this.nota.consumidor = c; return this; }
   cpfConsumidor(cpf: string, nome?: string): this { this.nota.consumidor = { cpf, nome }; return this; }
@@ -30,7 +31,6 @@ export class NfceBuilder {
     const n = this.nota as NotaNfce;
     if (!n.emitente) throw new Error('emitente não informado');
     n.serie ??= 1;
-    if (n.numero === undefined) throw new Error('numero não informado');
     validarNota(n, { exigirIbsCbs: false });
     return { ...n, itens: [...n.itens], pagamentos: [...n.pagamentos] };
   }

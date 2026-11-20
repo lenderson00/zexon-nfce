@@ -23,6 +23,7 @@ if (r.status === 'autorizada') await imprimir(await nfce.danfcePdf(r.xmlAutoriza
 - [Contingência offline](#contingência-offline)
 - [DANFCE](#danfce)
 - [Armazenamento dos XMLs](#armazenamento-dos-xmls)
+- [Registro, numeração e resiliência](#registro-numeração-e-resiliência)
 - [Configuração](#configuração)
 - [URLs por UF (endpoints)](#urls-por-uf-endpoints)
 - [Certificado e TLS](#certificado-e-tls)
@@ -36,13 +37,15 @@ if (r.status === 'autorizada') await imprimir(await nfce.danfcePdf(r.xmlAutoriza
 
 ## Situação do projeto
 
-> **Versão 0.2 — pronta para homologação (Simples Nacional e Regime Normal com IBS/CBS).**
+> **Versão 0.3 — pronta para homologação (Simples Nacional e Regime Normal com IBS/CBS).**
 > Ainda não testada contra uma SEFAZ real; os testes usam uma SEFAZ simulada e os XSDs oficiais.
 
 | Tema | Situação |
 |---|---|
 | Emissão, consulta, cancelamento, inutilização, status | ✅ Implementado |
 | Contingência offline (`tpEmis=9`) e retransmissão | ✅ Implementado |
+| Emissão resiliente: grava antes de enviar, retentativas, `retomar`, `processarPendentes` | ✅ Implementado |
+| Registro das notas em banco e numeração automática (Postgres incluso) | ✅ Implementado (interfaces abertas para outros bancos) |
 | QR Code v2 (com CSC) e v3 (sem CSC) | ✅ Implementado (v2 conferido com os exemplos do manual) |
 | DANFCE em HTML e PDF (80 mm) | ✅ Implementado |
 | XML validado contra o XSD oficial (PL_010h) | ✅ Coberto por testes |
@@ -63,6 +66,9 @@ if (r.status === 'autorizada') await imprimir(await nfce.danfcePdf(r.xmlAutoriza
   - em timeout/queda, consulta a chave antes de decidir (não duplica nota já autorizada);
   - duplicidade (cStat 204) recupera o protocolo existente;
   - lote assíncrono (cStat 103/105) consulta o recibo.
+- **Nenhuma nota perdida:** a nota é gravada antes do envio; falhas temporárias são repetidas e o que sobrar é concluído depois por `retomar`/`processarPendentes`, sempre com a mesma chave.
+- **Idempotência por pedido:** `emitir(nota, { referencia: 'pedido-123' })` nunca gera duas notas para a mesma venda.
+- **Registro em banco e numeração automática** por CNPJ/série/ambiente (Postgres pronto; outros bancos via interface).
 - **Contingência offline** manual ou automática, com fila de retransmissão.
 - **DANFCE** em HTML (para tela/impressão pelo navegador) e PDF (impressora térmica).
 - **Armazenamento plugável** dos XMLs (disco, memória ou sua implementação).
@@ -180,22 +186,26 @@ CNPJ/CPF, GTIN, NCM, CFOP, CEST, município (IBGE), CEP, série (0–889), núme
 | Operação | Método | Retorno |
 |---|---|---|
 | Status da SEFAZ | `status()` | `{ online, cStat, xMotivo, tempoMedioSegundos }` |
-| Emitir | `emitir(nota)` | `ResultadoEmissao` |
+| Emitir | `emitir(nota, { referencia? })` | `ResultadoEmissao` |
+| Concluir nota pendente | `retomar(chave)` | `ResultadoEmissao` |
+| Processar pendentes (cron/fila) | `processarPendentes({ limite?, cnpj? })` | `ResultadoEmissao[]` (nunca lança) |
+| Reemitir rejeitada (mesmo número) | `reemitir(chave, notaCorrigida)` | `ResultadoEmissao` |
 | Montar e assinar sem enviar | `preparar(nota, { offline? })` | `{ chave, xmlAssinado, qrCode, urlChave, totais }` |
 | Consultar por chave | `consultar(chave)` | `{ situacao: 'autorizada' \| 'cancelada' \| 'denegada' \| 'inexistente' \| 'outra', protocolo, eventos }` |
 | Cancelar | `cancelar({ chave, protocolo, justificativa })` | `ResultadoEvento` |
 | Cancelar por substituição | `cancelarPorSubstituicao({ chave, protocolo, justificativa, chaveSubstituta })` | `ResultadoEvento` |
 | Inutilizar numeração | `inutilizar({ serie, numeroInicial, numeroFinal?, justificativa })` | `ResultadoInutilizacao` |
-| Emitir offline | `contingencia.emitirOffline(nota, motivo?)` | `ResultadoEmissao` (`status: 'contingencia'`) |
+| Emitir offline | `contingencia.emitirOffline(nota, motivo?, { referencia? })` | `ResultadoEmissao` (`status: 'contingencia'`) |
 | Listar pendentes | `contingencia.pendentes()` | chaves |
-| Retransmitir pendentes | `contingencia.transmitirPendentes()` | `ResultadoEmissao[]` |
+| Retransmitir pendentes | `contingencia.transmitirPendentes()` | igual a `processarPendentes()` |
 | DANFCE | `danfceHtml(xml)` / `danfcePdf(xml)` | `string` / `Buffer` |
 
 ### `ResultadoEmissao`
 
 ```ts
 {
-  status: 'autorizada' | 'rejeitada' | 'denegada' | 'contingencia';
+  status: 'autorizada' | 'rejeitada' | 'denegada' | 'contingencia'
+        | 'pendente' | 'cancelada' | 'conflito';  // ver "Registro, numeração e resiliência"
   chave: string;              // 44 dígitos
   numero: number; serie: number;
   cStat: string; xMotivo: string;
@@ -204,6 +214,7 @@ CNPJ/CPF, GTIN, NCM, CFOP, CEST, município (IBGE), CEP, série (0–889), núme
   xmlAutorizado?: string;     // nfeProc (NFe + protocolo): guarde por 5 anos
   qrCode: string; urlChave: string;
   totais: { valorNota: number };
+  tentativas?: number;        // tentativas de envio nesta chamada
 }
 ```
 
@@ -290,6 +301,7 @@ Como funciona:
 1. A nota é assinada com `tpEmis=9`, `dhCont`, `xJust` e QR Code offline, e salva em `storage` (`contingencia/`).
 2. O DANFCE sai com "EMITIDA EM CONTINGÊNCIA — Pendente de autorização".
 3. Na retransmissão, cada chave é **consultada antes** do reenvio. Autorizadas vão para `autorizadas/`; rejeitadas vão para `rejeitadas/` e precisam de tratamento manual (por exemplo, emitir uma nova nota e cancelar por substituição).
+4. Na contingência automática, a nota online que falhou é guardada em `substituidas/` e **nunca é reenviada**. Se ela tiver sido autorizada sem a resposta chegar, a cópia offline não é transmitida e volta com `status: 'conflito'` para tratamento manual.
 
 ---
 
@@ -351,7 +363,7 @@ new S3Storage({ bucket: 'nfce', endpoint: 'https://<conta>.r2.cloudflarestorage.
 
 ### Implementação própria
 
-Para banco de dados ou outro serviço, implemente a interface. Tipos de documento: `autorizadas`, `cancelamentos`, `inutilizacoes`, `contingencia`, `rejeitadas`.
+Para banco de dados ou outro serviço, implemente a interface. Tipos de documento: `autorizadas`, `pendentes`, `contingencia`, `rejeitadas`, `substituidas`, `cancelamentos`, `inutilizacoes`.
 
 ```ts
 interface Storage {
@@ -361,6 +373,104 @@ interface Storage {
   remover(tipo, nome): Promise<void>;
 }
 ```
+
+---
+
+## Registro, numeração e resiliência
+
+A biblioteca não tem fila nem banco próprios. Ela garante que cada operação possa ser **repetida com segurança** e deixa o estado gravado onde o seu sistema consegue retomar. *Quando* processar (cron, fila, worker) fica com você.
+
+Três peças independentes e opcionais, cada uma uma interface:
+
+| Peça | Função | Prontas |
+|---|---|---|
+| `storage` (`Storage`) | XML assinado/autorizado (imutável) | `S3Storage`, `FileStorage`, `MemoryStorage` |
+| `registro` (`RegistroNotas`) | estado e dados de cada nota (banco) | `PostgresRegistro`, `MemoryRegistro` |
+| `numerador` (`Numerador`) | próximo número por CNPJ/série/ambiente | `PostgresNumerador`, `MemoryNumerador` |
+
+### Configuração com Postgres
+
+```ts
+import { Pool } from 'pg';
+import { NfceClient, S3Storage, PostgresRegistro, PostgresNumerador, criarTabelas } from 'zexon-nfce';
+
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+await criarTabelas(pool);               // idempotente; ou use sqlMigracao() na sua ferramenta de migração
+
+const nfce = new NfceClient({
+  // ...uf, ambiente, certificado, csc
+  storage: new S3Storage({ bucket: 'minha-empresa-nfce' }),
+  registro: new PostgresRegistro(pool),
+  numerador: new PostgresNumerador(pool),
+});
+
+// Sem `numero`: o numerador fornece. Com `referencia`: nunca duas notas para o mesmo pedido.
+const r = await nfce.emitir(notaSemNumero, { referencia: `pedido-${pedido.id}` });
+```
+
+Os adaptadores Postgres **não dependem de nenhum pacote**: recebem qualquer objeto com `query(sql, params)` — `pg.Pool`, `pg.Client`, uma transação (`PoolClient`) ou PGlite. Opção `{ schema: 'fiscal' }` para usar outro schema.
+
+Tabelas criadas: `nfce_sequencia` (uma linha por CNPJ + ambiente + modelo + série) e `nfce_nota` (uma linha por chave, com `referencia` única por CNPJ/ambiente).
+
+### O que acontece em `emitir`
+
+1. Se a `referencia` já existe no registro → devolve (ou conclui) **a mesma nota**.
+2. Valida a nota e, se não houver `numero`, pede ao `numerador` (só depois de validar: erro de validação não gasta número).
+3. Assina e **grava antes de enviar**: XML em `storage` (`pendentes/`) e registro com `situacao: 'pendente'`. A chave fica fixada.
+4. Envia com **retentativa curta** em falha temporária (padrão: 3 tentativas; `retentativas: { tentativas, esperasMs }`).
+5. Se ainda falhar, **consulta a chave** (a SEFAZ pode ter autorizado sem a resposta chegar). Se não, a nota fica `pendente` e o erro sai com `retentavel: true` e `chave` — ou vai para contingência, se `contingenciaAutomatica`.
+6. Resultado definitivo → registro atualizado (`autorizada`, `rejeitada`, `denegada`, protocolo, tentativas) e XML movido.
+
+### Concluindo o que ficou pendente
+
+```ts
+// Uma nota específica (ex.: o erro de emitir trouxe e.chave)
+await nfce.retomar(chave);
+
+// Todas: chame periodicamente — nunca lança, devolve o status de cada nota
+await nfce.processarPendentes({ limite: 50 });
+```
+
+`retomar` é idempotente: consulta a chave antes e só reenvia o **mesmo XML** se a SEFAZ não a conhecer. Exemplos de agendamento:
+
+```ts
+setInterval(() => nfce.processarPendentes(), 60_000);                     // processo único
+cron.schedule('*/2 * * * *', () => nfce.processarPendentes());             // node-cron
+new Worker('nfce', async (job) => nfce.retomar(job.data.chave));           // BullMQ: enfileire e.chave
+export const handler = async (ev) => { for (const m of ev.Records) await nfce.retomar(JSON.parse(m.body).chave); }; // SQS + Lambda
+```
+
+Em SaaS com vários emitentes, crie um `NfceClient` por empresa (o certificado é por empresa) compartilhando `storage`, `registro` e `numerador`, e passe `processarPendentes({ cnpj })` — o filtro por UF e ambiente é automático.
+
+### Rejeições e numeração sem buracos
+
+```ts
+const r = await nfce.emitir(nota, { referencia: 'pedido-42' });
+if (r.status === 'rejeitada') {
+  // corrija e reemita com a MESMA série e número (nova chave; a referência passa para a nova nota)
+  await nfce.reemitir(r.chave, notaCorrigida);
+}
+
+// Números entregues sem nota válida (ex.: requisições repetidas, falhas antes do envio) — para inutilizar
+const buracos = await new PostgresRegistro(pool).buracos({ cnpj, ambiente: 'producao', serie: 1 });
+if (buracos.length) await nfce.inutilizar({ serie: 1, numeroInicial: buracos[0], numeroFinal: buracos[0], justificativa: 'Numero reservado e nao utilizado' });
+```
+
+`PostgresNumerador.definirInicio(seq, 5001)` faz a numeração continuar de onde o emissor anterior parou.
+
+### Situações no registro
+
+| `situacao` | Significado |
+|---|---|
+| `pendente` | gravada, sem resposta definitiva — `processarPendentes` conclui |
+| `contingencia` | emitida offline, aguardando transmissão |
+| `autorizada` / `rejeitada` / `denegada` | resposta definitiva da SEFAZ |
+| `substituida` | nota online trocada por uma de contingência (não é reenviada) |
+| `conflito` | a original apareceu autorizada depois da contingência — tratar manualmente |
+
+### Outro banco
+
+Implemente `RegistroNotas` (`registrar`, `atualizar`, `buscar`, `buscarPorReferencia`, `pendentes`) e/ou `Numerador` (`proximo`). Requisitos: `registrar` deve recusar chave ou referência repetida com `RegistroDuplicadoError`, e `proximo` deve ser atômico.
 
 ---
 
@@ -381,6 +491,9 @@ interface Storage {
 | `versaoSoftware` | `string` | vai em `verProc` |
 | `fusoMinutos` | `number` | padrão pelo fuso da UF (ex.: −180, AM −240, AC −300) |
 | `ibsCbsPadrao` | `{ cClassTrib, ... }` | IBS/CBS aplicado aos itens sem `ibsCbs` |
+| `registro` | `RegistroNotas` | estado das notas em banco (`PostgresRegistro`); exige `storage` |
+| `numerador` | `Numerador` | fornece `numero` quando a nota não traz (`PostgresNumerador`) |
+| `retentativas` | `{ tentativas?, esperasMs? }` | padrão 3 tentativas, esperas 500/1500 ms |
 
 ---
 
@@ -433,19 +546,22 @@ Evite `rejectUnauthorized: false` em produção.
 | Classe | Quando |
 |---|---|
 | `ValidationError` | nota inválida antes do envio (`campos` lista os caminhos com problema) |
-| `TransportError` | timeout, DNS, TLS, HTTP — candidata a contingência |
-| `SefazError` | SEFAZ indisponível (cStat 108/109) |
+| `TransportError` | timeout, DNS, TLS, HTTP — `retentavel: true` |
+| `SefazError` | SEFAZ indisponível (cStat 108/109/999) — `retentavel: true` |
+| `RegistroDuplicadoError` | chave ou referência já registrada |
 | `CertificateError` | PFX inválido, senha errada, certificado vencido |
 | `NfceError` | base de todas; também endpoint/storage ausente |
 
 Rejeições de negócio **não** lançam exceção: voltam em `status: 'rejeitada'` com `cStat` e `xMotivo`.
+
+Todo `NfceError` tem `retentavel` (vale repetir mais tarde?) e, quando a nota já foi gravada, `chave` — use-a em `retomar(chave)` ou na sua fila.
 
 ```ts
 try {
   const r = await nfce.emitir(nota);
 } catch (e) {
   if (e instanceof ValidationError) mostrarErros(e.campos);
-  else if (e instanceof TransportError) /* sem contingência automática */ ;
+  else if (e instanceof NfceError && e.retentavel) await fila.enfileirar({ chave: e.chave }); // concluir depois com nfce.retomar
   else throw e;
 }
 ```
@@ -461,8 +577,9 @@ try {
 5. Cancelar uma nota (dentro do prazo da UF).
 6. Inutilizar uma faixa.
 7. Simular queda de rede, emitir offline e retransmitir.
-8. Ler o QR Code impresso com o celular e conferir a consulta pública.
-9. Imprimir o DANFCE na impressora térmica real.
+8. Derrubar o processo durante um envio e conferir que `processarPendentes()` conclui a mesma chave.
+9. Ler o QR Code impresso com o celular e conferir a consulta pública.
+10. Imprimir o DANFCE na impressora térmica real.
 
 ---
 
@@ -480,9 +597,12 @@ src/
   events/                cancelamento, substituição, inutilização
   danfce/                HTML e PDF
   storage/               S3Storage, FileStorage, MemoryStorage
+  registro/              interface RegistroNotas + MemoryRegistro
+  numerador/             interface Numerador + MemoryNumerador
+  postgres/              PostgresRegistro, PostgresNumerador, criarTabelas (sem dependências)
   errors/                hierarquia de erros
 schemas/                 XSDs oficiais (PL_010h + serviços + eventos)
-test/                    unitários, validação XSD e SEFAZ simulada
+test/                    unitários, XSD, SEFAZ simulada, Postgres (PGlite) e cenários de falha
 examples/                exemplo de ponta a ponta
 ```
 

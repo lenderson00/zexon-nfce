@@ -121,7 +121,8 @@ export interface ResponsavelTecnico {
 export interface NotaNfce {
   emitente: Emitente;
   serie: number;
-  numero: number;
+  /** Número da nota. Se omitido, o cliente usa o `numerador` configurado. */
+  numero?: number;
   itens: Item[];
   pagamentos: Pagamento[];
   consumidor?: Consumidor;

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 Lenderson Macedo — licença comercial disponível (ver COPYRIGHT.md).
 export { NfceClient, Contingencia, fusoDaUF } from './client/NfceClient.js';
-export type { NfceClientConfig, ResultadoEmissao, ResultadoConsulta, ResultadoEvento, ResultadoInutilizacao, StatusEmissao } from './client/NfceClient.js';
+export type { NfceClientConfig, OpcoesEmissao, ResultadoEmissao, ResultadoConsulta, ResultadoEvento, ResultadoInutilizacao, StatusEmissao } from './client/NfceClient.js';
 export { NfceBuilder } from './builder/NfceBuilder.js';
 export * from './types.js';
 export { validarNota, cpfValido, cnpjValido, gtinValido } from './validation/index.js';
@@ -22,3 +22,9 @@ export type { Storage, TipoDocumento } from './storage/index.js';
 export * from './errors/index.js';
 export { calcularIbsCbs, aliquotasPadrao, baseIbsCbs, classTrib, CCLASSTRIB_NFCE, CST_IBSCBS } from './rtc/index.js';
 export type { ClassTrib, IndicadoresCst } from './rtc/index.js';
+export { MemoryRegistro, RegistroDuplicadoError } from './registro/index.js';
+export type { RegistroNotas, RegistroNota, SituacaoNota, AtualizacaoRegistro, FiltroPendentes } from './registro/index.js';
+export { MemoryNumerador } from './numerador/index.js';
+export type { Numerador, ChaveSequencia } from './numerador/index.js';
+export { PostgresRegistro, PostgresNumerador, criarTabelas, sqlMigracao } from './postgres/index.js';
+export type { ExecutorSql, OpcoesPostgres } from './postgres/index.js';

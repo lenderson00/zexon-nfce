@@ -3,7 +3,11 @@
 import { mkdir, readFile, readdir, rename, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
-export type TipoDocumento = 'autorizadas' | 'cancelamentos' | 'inutilizacoes' | 'contingencia' | 'rejeitadas';
+/**
+ * - pendentes: assinadas e ainda sem resposta definitiva da SEFAZ
+ * - substituidas: notas online que deram lugar a uma de contingência (guardadas para conferência)
+ */
+export type TipoDocumento = 'autorizadas' | 'cancelamentos' | 'inutilizacoes' | 'contingencia' | 'rejeitadas' | 'pendentes' | 'substituidas';
 
 /** Interface de persistência de XMLs. Implemente para S3, banco, etc. */
 export interface Storage {

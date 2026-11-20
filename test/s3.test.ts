@@ -64,7 +64,7 @@ describe('S3Storage', () => {
     const storage = new S3Storage({ bucket: 'nfce', client }); // mesmo uso do FileStorage
     const pfx = gerarPfxTeste();
     const off = new NfceClient({
-      uf: 'SP', ambiente: 'homologacao', certificado: pfx, storage, contingenciaAutomatica: true,
+      uf: 'SP', ambiente: 'homologacao', certificado: pfx, storage, contingenciaAutomatica: true, retentativas: { esperasMs: [0] },
       transporte: { fetchImpl: async () => { throw new TransportError('offline'); } },
     });
     const r = await off.emitir(notaExemplo());
