@@ -308,14 +308,49 @@ const html = await nfce.danfceHtml(r.xmlAutorizado!);          // inclui QR Code
 
 ## Armazenamento dos XMLs
 
+O jeito mais curto é passar uma string em `storage`:
+
 ```ts
-new FileStorage('./nfce-data')   // disco
-new MemoryStorage()              // testes
+new NfceClient({ /* ... */ storage: 's3://minha-empresa-nfce/loja-01' }); // Amazon S3
+new NfceClient({ /* ... */ storage: './nfce-data' });                    // pasta local
 ```
 
-Estrutura em disco: `autorizadas/`, `cancelamentos/`, `inutilizacoes/`, `contingencia/`, `rejeitadas/` — um `<chave>.xml` por documento.
+### Amazon S3 (e compatíveis)
 
-Para S3, banco de dados etc., implemente a interface:
+```bash
+npm install @aws-sdk/client-s3   # dependência opcional, só para quem usa S3
+```
+
+```ts
+import { S3Storage } from 'zexon-nfce';
+
+new S3Storage({ bucket: 'minha-empresa-nfce' });          // mínimo necessário
+new S3Storage({
+  bucket: 'minha-empresa-nfce',
+  prefixo: 'loja-01',                                     // padrão: 'nfce'
+  regiao: 'sa-east-1',                                    // padrão: AWS_REGION
+  credenciais: { accessKeyId, secretAccessKey },          // padrão: cadeia da AWS (env, perfil, IAM role)
+});
+
+// MinIO, Cloudflare R2, DigitalOcean Spaces, Wasabi...
+new S3Storage({ bucket: 'nfce', endpoint: 'https://<conta>.r2.cloudflarestorage.com', criptografia: false });
+```
+
+- Credenciais: se não informadas, valem as variáveis `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`, o perfil `~/.aws` ou a IAM role da máquina/container.
+- Chaves no bucket: `<prefixo>/<tipo>/<chave>.xml` — ex.: `loja-01/autorizadas/3526…0670.xml`.
+- Objetos gravados com `Content-Type: application/xml` e criptografia `AES256` no servidor.
+- Permissões IAM mínimas: `s3:PutObject`, `s3:GetObject`, `s3:DeleteObject` e `s3:ListBucket` no bucket.
+- Dica: ative o **versionamento** do bucket e uma regra de ciclo de vida para manter os XMLs pelo prazo legal (5 anos).
+
+### Outras opções
+
+| Classe | Uso |
+|---|---|
+| `S3Storage` | produção, vários caixas/lojas compartilhando a fila de contingência |
+| `FileStorage` | um único servidor/PDV |
+| `MemoryStorage` | testes |
+
+Tipos de documento: `autorizadas`, `cancelamentos`, `inutilizacoes`, `contingencia`, `rejeitadas`. Para banco de dados ou outro serviço, implemente:
 
 ```ts
 interface Storage {
@@ -337,7 +372,7 @@ interface Storage {
 | `certificado` | `{ pfx: Buffer \| string, senha }` | A1; `pfx` aceita o conteúdo ou o caminho |
 | `csc` | `{ id, codigo }` | obrigatório para QR Code v2 |
 | `qrCodeVersao` | `2 \| 3` | padrão: 2 com CSC, 3 sem |
-| `storage` | `Storage` | obrigatório para contingência |
+| `storage` | `Storage \| string` | `'s3://bucket/prefixo'`, caminho de pasta ou implementação própria; obrigatório para contingência |
 | `contingenciaAutomatica` | `boolean` | SEFAZ fora ⇒ emite offline |
 | `endpoints` | `EndpointsOverride` | URLs de serviços, QR Code e consulta |
 | `transporte` | `{ timeoutMs, ca, rejectUnauthorized, fetchImpl }` | rede/TLS; `fetchImpl` para mocks |
@@ -443,7 +478,7 @@ src/
   sefaz/                 endpoints por UF, SOAP 1.2, parse de retornos
   events/                cancelamento, substituição, inutilização
   danfce/                HTML e PDF
-  storage/               FileStorage, MemoryStorage
+  storage/               S3Storage, FileStorage, MemoryStorage
   errors/                hierarquia de erros
 schemas/                 XSDs oficiais (PL_010h + serviços + eventos)
 test/                    unitários, validação XSD e SEFAZ simulada
