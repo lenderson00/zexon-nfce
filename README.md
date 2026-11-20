@@ -696,11 +696,11 @@ npm run build       # dist/ ESM + CJS + .d.ts
 ### Publicar uma nova versão
 
 ```bash
-npm version patch        # ou minor/major — cria o commit e a tag vX.Y.Z
-git push --follow-tags   # o workflow "Release" testa, compila e publica no npm
+npm version patch --no-git-tag-version   # ou minor/major
+git commit -am "release: vX.Y.Z" && git push   # o workflow "Release" testa, compila, publica e cria a tag
 ```
 
-Também dá para publicar sem tag: em *Actions → Release → Run workflow* ele publica a versão do `package.json` e cria a tag. O workflow `.github/workflows/release.yml` usa o secret `NPM_TOKEN` do repositório (token granular do npm com escrita em `@zexon`) e publica com *provenance*. `prepublishOnly` roda typecheck, testes e build, então uma versão quebrada não sai.
+O workflow roda a cada push na `main` que altere o `package.json`; se a versão já estiver no npm, ele não faz nada. O workflow `.github/workflows/release.yml` usa o secret `NPM_TOKEN` do repositório (token granular do npm com escrita em `@zexon`) e publica com *provenance*. `prepublishOnly` roda typecheck, testes e build, então uma versão quebrada não sai.
 
 Exemplo de API para o Pará em homologação: `examples/emitir.ts` (lê `CERT_PFX`, `CERT_SENHA`, `CSC_ID`, `CSC`, `EMIT_CNPJ`, `EMIT_IE`, `DATABASE_URL`, `S3_BUCKET` e `SEFAZ_CA_DIR` do ambiente; requer `npm install pg`).
 

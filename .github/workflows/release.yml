@@ -1,8 +1,12 @@
 name: Release
+# Publica quando a versão do package.json muda na main (ou por tag/disparo manual).
+# Se a versão já estiver no npm, não faz nada.
 on:
   push:
+    branches: [main]
+    paths: ['package.json', '.github/workflows/release.yml']
     tags: ['v*']
-  workflow_dispatch: {}   # publica a versão do package.json e cria a tag vX.Y.Z
+  workflow_dispatch: {}
 permissions:
   contents: write   # criar a tag no disparo manual
   id-token: write   # provenance do npm
@@ -24,16 +28,20 @@ jobs:
       - name: Tag confere com o package.json
         if: github.ref_type == 'tag'
         run: test "${{ steps.v.outputs.tag }}" = "${GITHUB_REF_NAME}"
-      - name: Versão ainda não publicada
+      - name: Versão já publicada?
+        id: pub
         run: |
           if npm view "$(node -p 'require("./package.json").name')@$(node -p 'require("./package.json").version')" version 2>/dev/null; then
-            echo "Esta versão já está no npm; rode npm version patch antes." && exit 1
+            echo "skip=true" >> "$GITHUB_OUTPUT"; echo "Versão já está no npm — nada a publicar."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
-      - run: npm publish --provenance --access public
+      - if: steps.pub.outputs.skip == 'false'
+        run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - name: Criar a tag (disparo manual)
-        if: github.ref_type != 'tag'
+      - name: Criar a tag
+        if: steps.pub.outputs.skip == 'false' && github.ref_type != 'tag'
         run: |
           git tag "${{ steps.v.outputs.tag }}"
           git push origin "${{ steps.v.outputs.tag }}"
