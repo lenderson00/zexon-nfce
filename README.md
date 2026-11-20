@@ -1,16 +1,73 @@
 # zexon-nfce
 
-Biblioteca TypeScript/Node.js para **NFC-e (modelo 65, leiaute 4.00)**: emissão, consulta, cancelamento, inutilização, status do serviço, contingência offline e DANFCE (HTML/PDF).
+Biblioteca TypeScript/Node.js para operar a **NFC-e — Nota Fiscal de Consumidor Eletrônica (modelo 65, leiaute 4.00)** no dia a dia do varejo: emitir, consultar, cancelar, inutilizar, trabalhar em contingência offline e imprimir o DANFCE.
 
-- Assinatura XMLDSig (RSA-SHA1) com certificado A1 (`.pfx`)
-- QR Code **v2** (CSC) e **v3** (sem CSC), online e offline (`tpEmis=9`)
-- Transporte SOAP 1.2 com TLS mútuo
-- XML gerado validado contra os **XSDs oficiais** (pacote PL_010h, em `schemas/`)
-- Node ≥ 20, ESM + CJS, tipos incluídos
+```ts
+const r = await nfce.emitir(nota);
+if (r.status === 'autorizada') await imprimir(await nfce.danfcePdf(r.xmlAutorizado!));
+```
 
-> **Antes de ir a produção:** valide em homologação com seu certificado e CSC. A tabela embutida de URLs
-> (`src/sefaz/endpoints.ts`) é parcial (SP, MG, PR e UFs atendidas pela SVRS) e as URLs mudam; confira em
-> [nfce.encat.org](https://nfce.encat.org/desenvolvedor/) e informe `endpoints` para as demais UFs.
+<p align="center"><img src="docs/img/danfce-exemplo.png" alt="DANFCE gerado pela biblioteca: nota autorizada e nota em contingência" width="620"></p>
+
+---
+
+## Sumário
+
+- [Situação do projeto](#situação-do-projeto)
+- [Recursos](#recursos)
+- [Instalação](#instalação)
+- [Primeiros passos](#primeiros-passos)
+- [Montando a nota](#montando-a-nota)
+- [Rotina diária (API)](#rotina-diária-api)
+- [Contingência offline](#contingência-offline)
+- [DANFCE](#danfce)
+- [Armazenamento dos XMLs](#armazenamento-dos-xmls)
+- [Configuração](#configuração)
+- [URLs por UF (endpoints)](#urls-por-uf-endpoints)
+- [Certificado e TLS](#certificado-e-tls)
+- [Tratamento de erros](#tratamento-de-erros)
+- [Checklist de homologação](#checklist-de-homologação)
+- [Arquitetura](#arquitetura)
+- [Desenvolvimento](#desenvolvimento)
+- [Fontes oficiais](#fontes-oficiais)
+
+---
+
+## Situação do projeto
+
+> **Versão 0.1 — pronta para homologação de emitentes do Simples Nacional.**
+> Ainda não testada contra uma SEFAZ real; os testes usam uma SEFAZ simulada e os XSDs oficiais.
+
+| Tema | Situação |
+|---|---|
+| Emissão, consulta, cancelamento, inutilização, status | ✅ Implementado |
+| Contingência offline (`tpEmis=9`) e retransmissão | ✅ Implementado |
+| QR Code v2 (com CSC) e v3 (sem CSC) | ✅ Implementado (v2 conferido com os exemplos do manual) |
+| DANFCE em HTML e PDF (80 mm) | ✅ Implementado |
+| XML validado contra o XSD oficial (PL_010h) | ✅ Coberto por testes |
+| **Reforma tributária (IBS/CBS)** — Simples Nacional / MEI (CRT 1, 2, 4) | ✅ Não exigido até 2027 (NT 2025.002) |
+| **Reforma tributária (IBS/CBS)** — Regime Normal (CRT 3) | ❌ **Pendente.** Exigido por lei desde 01/01/2026; em homologação a SEFAZ rejeita sem o grupo `IBSCBS` (rejeição 1115) desde 01/07/2026 |
+| ICMS-ST (CST 10/30/70), IPI, ISSQN, Imposto Seletivo | ❌ Fora do escopo da v0.1 |
+| URLs de todas as UFs | ⚠️ Parcial: SP, MG, PR e UFs atendidas pela SVRS. As demais precisam ser informadas em `endpoints` |
+
+---
+
+## Recursos
+
+- **Cliente único** (`NfceClient`) com todas as operações da rotina de caixa.
+- **Builder fluente** (`NfceBuilder`) que valida a nota e devolve **todos** os erros de uma vez.
+- **Assinatura digital** XMLDSig (RSA-SHA1, C14N) com certificado A1 (`.pfx`).
+- **Envio síncrono** com recuperação automática:
+  - em timeout/queda, consulta a chave antes de decidir (não duplica nota já autorizada);
+  - duplicidade (cStat 204) recupera o protocolo existente;
+  - lote assíncrono (cStat 103/105) consulta o recibo.
+- **Contingência offline** manual ou automática, com fila de retransmissão.
+- **DANFCE** em HTML (para tela/impressão pelo navegador) e PDF (impressora térmica).
+- **Armazenamento plugável** dos XMLs (disco, memória ou sua implementação).
+- Textos obrigatórios de **homologação** aplicados automaticamente.
+- Node ≥ 20, ESM + CommonJS, tipagem completa.
+
+---
 
 ## Instalação
 
@@ -18,88 +75,357 @@ Biblioteca TypeScript/Node.js para **NFC-e (modelo 65, leiaute 4.00)**: emissão
 npm install zexon-nfce
 ```
 
-## Uso rápido
+Requisitos: Node.js 20+, certificado digital **A1** do emitente e **CSC** (se usar QR Code v2), obtido no portal da SEFAZ da sua UF.
+
+---
+
+## Primeiros passos
 
 ```ts
-import { NfceClient, NfceBuilder, FileStorage } from 'zexon-nfce';
 import { readFileSync } from 'node:fs';
+import { NfceClient, NfceBuilder, FileStorage } from 'zexon-nfce';
 
 const nfce = new NfceClient({
   uf: 'SP',
-  ambiente: 'homologacao',
-  certificado: { pfx: readFileSync('cert.pfx'), senha: process.env.CERT_SENHA! },
-  csc: { id: 1, codigo: process.env.CSC! },       // QR Code v2. Sem csc => QR Code v3
-  storage: new FileStorage('./nfce-data'),        // guarda autorizadas, cancelamentos, contingência
-  contingenciaAutomatica: true,                   // SEFAZ fora do ar => emite offline
+  ambiente: 'homologacao',                       // 'producao' quando estiver pronto
+  certificado: { pfx: readFileSync('certificado.pfx'), senha: process.env.CERT_SENHA! },
+  csc: { id: 1, codigo: process.env.CSC! },      // sem csc => QR Code v3
+  storage: new FileStorage('./nfce-data'),
+  contingenciaAutomatica: true,
 });
 
-const nota = new NfceBuilder()
-  .emitente({ /* cnpj, razaoSocial, inscricaoEstadual, regimeTributario, endereco */ } as any)
-  .serie(1).numero(1234)
-  .cpfConsumidor('529.982.247-25')
-  .item({ codigo: '001', descricao: 'CAFE 250G', ncm: '09012100', cfop: '5102', unidade: 'UN',
-          quantidade: 2, valorUnitario: 12.5, icms: { csosn: '102', origem: 0 } })
-  .pagamento({ tipo: 'pix', valor: 25 })
-  .build();                                       // valida tudo e lista TODOS os erros
+// 1) A SEFAZ está no ar?
+console.log(await nfce.status()); // { online: true, cStat: '107', ... }
 
+// 2) Monte a nota
+const nota = new NfceBuilder()
+  .emitente({
+    cnpj: '11222333000181',
+    razaoSocial: 'MERCADINHO EXEMPLO LTDA',
+    inscricaoEstadual: '110042490114',
+    regimeTributario: 1, // Simples Nacional
+    endereco: {
+      logradouro: 'AV PAULISTA', numero: '1000', bairro: 'BELA VISTA',
+      codigoMunicipio: 3550308, municipio: 'SAO PAULO', uf: 'SP', cep: '01310100',
+    },
+  })
+  .serie(1)
+  .numero(4821)
+  .cpfConsumidor('529.982.247-25')
+  .item({
+    codigo: '000123', descricao: 'CAFE TORRADO 500G', ncm: '09012100', cfop: '5102',
+    unidade: 'UN', quantidade: 2, valorUnitario: 18.9,
+    icms: { csosn: '102', origem: 0 },
+  })
+  .pagamento({ tipo: 'pix', valor: 37.8 })
+  .build();
+
+// 3) Emita
 const r = await nfce.emitir(nota);
-if (r.status === 'autorizada') {
-  const pdf = await nfce.danfcePdf(r.xmlAutorizado!);   // bobina 80 mm
+
+switch (r.status) {
+  case 'autorizada':   console.log('Protocolo', r.protocolo); break;
+  case 'contingencia': console.log('Emitida offline, será transmitida depois'); break;
+  case 'rejeitada':
+  case 'denegada':     console.error(r.cStat, r.xMotivo); break;
 }
 ```
 
-## Rotina diária
+---
 
-| Operação | Método |
+## Montando a nota
+
+### Itens
+
+| Campo | Obrigatório | Observação |
+|---|---|---|
+| `codigo`, `descricao` | sim | |
+| `ncm` | sim | 8 dígitos |
+| `cfop` | sim | 4 dígitos (ex.: `5102`, `5405`) |
+| `unidade`, `quantidade`, `valorUnitario` | sim | até 4 casas decimais |
+| `gtin` | não | validado pelo dígito verificador; omitido ⇒ `SEM GTIN` |
+| `cest` | não | 7 dígitos |
+| `desconto`, `frete`, `seguro`, `outrasDespesas` | não | por item |
+| `icms` | sim | ver abaixo |
+| `pis`, `cofins` | não | padrão: CST 49 com valores zerados |
+| `valorTributosAprox` | não | Lei 12.741/2012, somado no total e impresso no DANFCE |
+
+### ICMS suportado
+
+| Regime | Opções |
 |---|---|
-| Emitir (síncrono) | `nfce.emitir(nota)` → `autorizada` \| `rejeitada` \| `denegada` \| `contingencia` |
-| Montar/assinar sem enviar | `nfce.preparar(nota)` |
-| Status da SEFAZ | `nfce.status()` |
-| Consultar por chave | `nfce.consultar(chave)` |
-| Cancelar | `nfce.cancelar({ chave, protocolo, justificativa })` |
-| Cancelar por substituição | `nfce.cancelarPorSubstituicao({ ..., chaveSubstituta })` |
-| Inutilizar numeração | `nfce.inutilizar({ serie, numeroInicial, numeroFinal, justificativa })` |
-| Contingência offline | `nfce.contingencia.emitirOffline(nota)` |
-| Retransmitir pendentes | `nfce.contingencia.transmitirPendentes()` (rode periodicamente) |
-| DANFCE | `nfce.danfceHtml(xml)` / `nfce.danfcePdf(xml)` |
+| Simples Nacional (`csosn`) | `101`, `102`, `103`, `300`, `400`, `500`, `900` |
+| Regime Normal (`cst`) | `00`, `20`, `40`, `41`, `50`, `60`, `90` |
 
-Comportamento relevante:
+Quando a base e o valor não são informados, a biblioteca calcula a partir do valor do item (produto − desconto + despesas).
 
-- Rejeições da SEFAZ são **devolvidas** (`status: 'rejeitada'`, `cStat`, `xMotivo`); falhas de rede lançam `TransportError`.
-- Após timeout/queda, `emitir` **consulta a chave** antes de decidir: se a nota chegou a ser autorizada, ela é recuperada (sem duplicar).
-- Duplicidade (cStat 204) é resolvida recuperando o protocolo existente.
-- Na retransmissão de contingência, cada chave é consultada antes do reenvio.
-- Em homologação, a biblioteca aplica os textos obrigatórios (primeiro item e destinatário).
+### Pagamentos
+
+`tipo` aceita: `dinheiro`, `cheque`, `cartao_credito`, `cartao_debito`, `credito_loja`, `vale_alimentacao`, `vale_refeicao`, `vale_presente`, `vale_combustivel`, `boleto`, `deposito`, `pix`, `transferencia`, `programa_fidelidade`, `sem_pagamento`, `outros` — ou o código `tPag` de 2 dígitos.
+
+- O troco (`vTroco`) é calculado automaticamente e só é aceito quando há pagamento em dinheiro.
+- Cartão integrado ao TEF: informe `cartao: { integrado: true, cnpjCredenciadora, bandeira, autorizacao }`.
+
+### Validações feitas antes do envio
+
+CNPJ/CPF, GTIN, NCM, CFOP, CEST, município (IBGE), CEP, série (0–889), número, limite de 990 itens, CST/CSOSN compatível com o regime, desconto maior que o item, soma dos pagamentos × total da nota, endereço obrigatório na entrega em domicílio (`presenca(4)`).
+
+---
+
+## Rotina diária (API)
+
+| Operação | Método | Retorno |
+|---|---|---|
+| Status da SEFAZ | `status()` | `{ online, cStat, xMotivo, tempoMedioSegundos }` |
+| Emitir | `emitir(nota)` | `ResultadoEmissao` |
+| Montar e assinar sem enviar | `preparar(nota, { offline? })` | `{ chave, xmlAssinado, qrCode, urlChave, totais }` |
+| Consultar por chave | `consultar(chave)` | `{ situacao: 'autorizada' \| 'cancelada' \| 'denegada' \| 'inexistente' \| 'outra', protocolo, eventos }` |
+| Cancelar | `cancelar({ chave, protocolo, justificativa })` | `ResultadoEvento` |
+| Cancelar por substituição | `cancelarPorSubstituicao({ chave, protocolo, justificativa, chaveSubstituta })` | `ResultadoEvento` |
+| Inutilizar numeração | `inutilizar({ serie, numeroInicial, numeroFinal?, justificativa })` | `ResultadoInutilizacao` |
+| Emitir offline | `contingencia.emitirOffline(nota, motivo?)` | `ResultadoEmissao` (`status: 'contingencia'`) |
+| Listar pendentes | `contingencia.pendentes()` | chaves |
+| Retransmitir pendentes | `contingencia.transmitirPendentes()` | `ResultadoEmissao[]` |
+| DANFCE | `danfceHtml(xml)` / `danfcePdf(xml)` | `string` / `Buffer` |
+
+### `ResultadoEmissao`
+
+```ts
+{
+  status: 'autorizada' | 'rejeitada' | 'denegada' | 'contingencia';
+  chave: string;              // 44 dígitos
+  numero: number; serie: number;
+  cStat: string; xMotivo: string;
+  protocolo?: string; dataAutorizacao?: string;
+  xmlAssinado: string;        // NFe assinada, com QR Code
+  xmlAutorizado?: string;     // nfeProc (NFe + protocolo): guarde por 5 anos
+  qrCode: string; urlChave: string;
+  totais: { valorNota: number };
+}
+```
+
+### Exemplos
+
+```ts
+// Cancelar (justificativa de 15 a 255 caracteres)
+await nfce.cancelar({ chave: r.chave, protocolo: r.protocolo!, justificativa: 'Desistencia da compra pelo cliente' });
+
+// Inutilizar números pulados
+await nfce.inutilizar({ serie: 1, numeroInicial: 4830, numeroFinal: 4835, justificativa: 'Falha no sistema pulou a numeracao' });
+
+// Conferir uma nota
+const c = await nfce.consultar('35261111222333000181650010000048211499370670');
+```
+
+---
+
+## Contingência offline
+
+Quando a SEFAZ não responde, a NFC-e pode ser emitida offline (`tpEmis=9`) e transmitida depois (em geral, em até 24 h — confira o prazo da sua UF).
+
+```ts
+// Automática: basta configurar contingenciaAutomatica: true + storage
+const r = await nfce.emitir(nota); // r.status === 'contingencia' se a SEFAZ estiver fora
+
+// Manual
+await nfce.contingencia.emitirOffline(nota, 'Queda do link de internet');
+
+// Agende a retransmissão (ex.: a cada 5 minutos)
+setInterval(async () => {
+  for (const r of await nfce.contingencia.transmitirPendentes()) {
+    console.log(r.chave, r.status, r.cStat);
+  }
+}, 5 * 60_000);
+```
+
+Como funciona:
+
+1. A nota é assinada com `tpEmis=9`, `dhCont`, `xJust` e QR Code offline, e salva em `storage` (`contingencia/`).
+2. O DANFCE sai com "EMITIDA EM CONTINGÊNCIA — Pendente de autorização".
+3. Na retransmissão, cada chave é **consultada antes** do reenvio. Autorizadas vão para `autorizadas/`; rejeitadas vão para `rejeitadas/` e precisam de tratamento manual (por exemplo, emitir uma nova nota e cancelar por substituição).
+
+---
+
+## DANFCE
+
+```ts
+const pdf  = await nfce.danfcePdf(r.xmlAutorizado!, { rodape: 'Obrigado pela preferência!' });
+const html = await nfce.danfceHtml(r.xmlAutorizado!);          // inclui QR Code embutido
+```
+
+- Aceita o `nfeProc` (autorizada) ou a NFe assinada (contingência).
+- Largura padrão 80 mm (`larguraMm` para 58 mm); a altura do PDF acompanha o conteúdo.
+- As funções também existem soltas: `gerarDanfcePdf(xml)`, `gerarDanfceHtml(xml)`.
+
+---
+
+## Armazenamento dos XMLs
+
+```ts
+new FileStorage('./nfce-data')   // disco
+new MemoryStorage()              // testes
+```
+
+Estrutura em disco: `autorizadas/`, `cancelamentos/`, `inutilizacoes/`, `contingencia/`, `rejeitadas/` — um `<chave>.xml` por documento.
+
+Para S3, banco de dados etc., implemente a interface:
+
+```ts
+interface Storage {
+  salvar(tipo, nome, conteudo): Promise<void>;
+  ler(tipo, nome): Promise<string | undefined>;
+  listar(tipo): Promise<string[]>;
+  remover(tipo, nome): Promise<void>;
+}
+```
+
+---
 
 ## Configuração
 
-| Opção | Descrição |
+| Opção | Tipo | Descrição |
+|---|---|---|
+| `uf` | `string` | UF do emitente (`'SP'`, `'MG'`...) |
+| `ambiente` | `'homologacao' \| 'producao'` | |
+| `certificado` | `{ pfx: Buffer \| string, senha }` | A1; `pfx` aceita o conteúdo ou o caminho |
+| `csc` | `{ id, codigo }` | obrigatório para QR Code v2 |
+| `qrCodeVersao` | `2 \| 3` | padrão: 2 com CSC, 3 sem |
+| `storage` | `Storage` | obrigatório para contingência |
+| `contingenciaAutomatica` | `boolean` | SEFAZ fora ⇒ emite offline |
+| `endpoints` | `EndpointsOverride` | URLs de serviços, QR Code e consulta |
+| `transporte` | `{ timeoutMs, ca, rejectUnauthorized, fetchImpl }` | rede/TLS; `fetchImpl` para mocks |
+| `responsavelTecnico` | `{ cnpj, contato, email, fone, csrt? }` | grupo `infRespTec` (+ hash CSRT) |
+| `versaoSoftware` | `string` | vai em `verProc` |
+| `fusoMinutos` | `number` | padrão pelo fuso da UF (ex.: −180, AM −240, AC −300) |
+
+---
+
+## URLs por UF (endpoints)
+
+A tabela embutida cobre **SP, MG, PR** e os serviços das UFs atendidas pela **SVRS** (AC, AL, AP, DF, ES, PB, PI, RJ, RN, RO, RR, SC, SE, TO). Para as UFs da SVRS ainda é preciso informar a URL do QR Code e da consulta. As URLs oficiais estão no Portal Nacional da NFC-e (nfce.encat.org → Desenvolvedor).
+
+```ts
+new NfceClient({
+  // ...
+  endpoints: {
+    RJ: {
+      homologacao: {
+        qrCode: 'https://<url-do-qrcode-da-UF>',       // conferir no nfce.encat.org
+        urlChave: 'https://<url-de-consulta-da-UF>',
+      },
+    },
+    BA: {
+      producao: {
+        servicos: { autorizacao: 'https://...', consultaProtocolo: 'https://...', /* ... */ },
+        qrCode: 'https://...', urlChave: 'https://...',
+      },
+    },
+  },
+});
+```
+
+Serviços: `autorizacao`, `retAutorizacao`, `consultaProtocolo`, `statusServico`, `inutilizacao`, `recepcaoEvento`.
+
+> ⚠️ As URLs mudam com o tempo. Confira as de sua UF antes de entrar em produção.
+
+---
+
+## Certificado e TLS
+
+- Use um certificado **A1** (`.pfx`/`.p12`). O CNPJ é lido do certificado quando possível (usado na inutilização).
+- O cliente recusa certificado vencido.
+- Os servidores da SEFAZ usam a cadeia **ICP-Brasil**, que não vem no Node. Baixe a cadeia no site do ITI e informe:
+
+```ts
+transporte: { ca: [readFileSync('icp-brasil-raiz-v5.crt'), readFileSync('ac-intermediaria.crt')] }
+```
+
+Evite `rejectUnauthorized: false` em produção.
+
+---
+
+## Tratamento de erros
+
+| Classe | Quando |
 |---|---|
-| `uf`, `ambiente` | UF do emitente e `'homologacao'`/`'producao'` |
-| `certificado` | `{ pfx: Buffer \| caminho, senha }` (A1) |
-| `csc` | `{ id, codigo }`; obrigatório no QR Code v2 |
-| `qrCodeVersao` | `2` ou `3` (padrão: 2 com CSC, 3 sem) |
-| `endpoints` | sobrescreve URLs de serviços, `qrCode` e `urlChave` por UF/ambiente |
-| `transporte` | `timeoutMs`, `ca` (cadeia ICP-Brasil dos servidores), `rejectUnauthorized`, `fetchImpl` (testes) |
-| `storage` | `FileStorage`, `MemoryStorage` ou sua implementação de `Storage` |
-| `responsavelTecnico` | grupo `infRespTec` (+ CSRT) exigido por algumas UFs |
+| `ValidationError` | nota inválida antes do envio (`campos` lista os caminhos com problema) |
+| `TransportError` | timeout, DNS, TLS, HTTP — candidata a contingência |
+| `SefazError` | SEFAZ indisponível (cStat 108/109) |
+| `CertificateError` | PFX inválido, senha errada, certificado vencido |
+| `NfceError` | base de todas; também endpoint/storage ausente |
 
-### TLS e cadeia ICP-Brasil
-Os servidores da SEFAZ usam certificados da cadeia ICP-Brasil, que não está no repositório de CAs do Node.
-Baixe a cadeia no site do ITI e passe em `transporte.ca`. Evite `rejectUnauthorized: false` em produção.
+Rejeições de negócio **não** lançam exceção: voltam em `status: 'rejeitada'` com `cStat` e `xMotivo`.
 
-## Tributação suportada nesta versão
-ICMS: CSOSN 101, 102/103/300/400, 500, 900; CST 00, 20, 40/41/50, 60, 90. PIS/COFINS: 01/02, 04–09 e outras (49, 99…).
-ST (CST 10/30/70), IPI, ISSQN e os grupos da reforma tributária (IBS/CBS) não são emitidos por NFC-e nesta versão.
+```ts
+try {
+  const r = await nfce.emitir(nota);
+} catch (e) {
+  if (e instanceof ValidationError) mostrarErros(e.campos);
+  else if (e instanceof TransportError) /* sem contingência automática */ ;
+  else throw e;
+}
+```
+
+---
+
+## Checklist de homologação
+
+1. Solicitar o CSC de homologação no portal da SEFAZ.
+2. `status()` deve retornar `cStat 107`.
+3. Emitir notas com cada meio de pagamento que a loja usa (dinheiro com troco, cartão, PIX).
+4. Emitir com e sem CPF do consumidor.
+5. Cancelar uma nota (dentro do prazo da UF).
+6. Inutilizar uma faixa.
+7. Simular queda de rede, emitir offline e retransmitir.
+8. Ler o QR Code impresso com o celular e conferir a consulta pública.
+9. Imprimir o DANFCE na impressora térmica real.
+
+---
+
+## Arquitetura
+
+```
+src/
+  client/NfceClient.ts   fachada: emitir, consultar, cancelar, inutilizar, status, contingência
+  builder/               NfceBuilder (API fluente)
+  validation/            regras de negócio pré-envio
+  xml/                   chave de acesso, montagem do infNFe, assinatura
+  qrcode/                QR Code v2/v3 online e offline
+  sefaz/                 endpoints por UF, SOAP 1.2, parse de retornos
+  events/                cancelamento, substituição, inutilização
+  danfce/                HTML e PDF
+  storage/               FileStorage, MemoryStorage
+  errors/                hierarquia de erros
+schemas/                 XSDs oficiais (PL_010h + serviços + eventos)
+test/                    unitários, validação XSD e SEFAZ simulada
+examples/                exemplo de ponta a ponta
+```
+
+---
 
 ## Desenvolvimento
 
 ```bash
-npm test          # unitários + XSD (requer xmllint) + SEFAZ simulada
+npm install
+npm test            # testes (a validação XSD usa o xmllint: apt install libxml2-utils)
 npm run typecheck
-npm run build
+npm run build       # dist/ ESM + CJS + .d.ts
 ```
 
-## Fontes oficiais usadas
-MOC 7.0 (NF-e/NFC-e), Anexo I (leiaute), Manual do DANFE NFC-e e QR Code v6.0, Manual de Contingência Offline v2.0 e XSDs
-do Portal Nacional da NF-e (nfe.fazenda.gov.br). Os vetores de teste do QR Code v2 vêm do manual.
+Exemplo real em homologação: `examples/emitir.ts` (lê `CERT_PFX`, `CERT_SENHA`, `CSC_ID`, `CSC`, `EMIT_CNPJ`, `EMIT_IE` do ambiente).
+
+---
+
+## Fontes oficiais
+
+Portal Nacional da NF-e (nfe.fazenda.gov.br):
+
+- Manual de Orientação ao Contribuinte (MOC) 7.0 e Anexo I — leiaute e regras de validação
+- Manual de Especificações Técnicas do DANFE NFC-e e QR Code, versão 6.0
+- Manual de Especificações da Contingência Offline para NFC-e, versão 2.0
+- NT 2025.002 v1.53 — Reforma Tributária (IBS/CBS/IS)
+- Esquemas XML: pacote PL_010h e PL_009q (serviços), eventos de cancelamento e cancelamento por substituição
+
+## Licença
+
+MIT
