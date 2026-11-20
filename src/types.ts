@@ -1,4 +1,7 @@
 import type { UF } from './xml/chave.js';
+import type { IbsCbsItem } from './rtc/index.js';
+
+export type { IbsCbsItem };
 
 export type Ambiente = 'producao' | 'homologacao';
 
@@ -77,6 +80,8 @@ export interface Item {
   cofins?: PisCofins;
   /** Valor aproximado dos tributos (Lei 12.741). */
   valorTributosAprox?: number;
+  /** IBS/CBS (reforma tributária). Obrigatório para Regime Normal (CRT 3) a partir de 2026. */
+  ibsCbs?: IbsCbsItem;
   informacoesAdicionais?: string;
 }
 
@@ -121,6 +126,8 @@ export interface NotaNfce {
   naturezaOperacao?: string;
   /** 1=presencial (padrão), 4=entrega em domicílio, 5=presencial fora do estabelecimento. */
   indicadorPresenca?: 1 | 4 | 5;
+  /** Município (IBGE) do fato gerador do IBS/CBS (cMunFGIBS). Usado só com indicadorPresenca=5; padrão: município do emitente. */
+  municipioFatoGerador?: number | string;
   /** Data de emissão (padrão: agora). */
   emissao?: Date;
   informacoesComplementares?: string;
@@ -147,4 +154,6 @@ export type VersaoQrCode = 2 | 3;
 export interface Totais {
   vProd: number; vDesc: number; vFrete: number; vSeg: number; vOutro: number;
   vBC: number; vICMS: number; vICMSDeson: number; vPIS: number; vCOFINS: number; vTotTrib: number; vNF: number;
+  /** Presente quando algum item tem IBS/CBS. */
+  ibsCbs?: { vBC: number; vIBSUF: number; vIBSMun: number; vIBS: number; vCBS: number; vNFTot: number };
 }

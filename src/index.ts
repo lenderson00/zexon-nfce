@@ -16,3 +16,5 @@ export type { DanfceOpcoes } from './danfce/index.js';
 export { FileStorage, MemoryStorage } from './storage/index.js';
 export type { Storage, TipoDocumento } from './storage/index.js';
 export * from './errors/index.js';
+export { calcularIbsCbs, aliquotasPadrao, baseIbsCbs, classTrib, CCLASSTRIB_NFCE, CST_IBSCBS } from './rtc/index.js';
+export type { ClassTrib, IndicadoresCst } from './rtc/index.js';

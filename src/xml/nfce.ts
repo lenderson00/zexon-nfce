@@ -4,6 +4,7 @@ import { TPAG } from '../types.js';
 import { UF_CODIGO, gerarCNF, montarChave } from './chave.js';
 import { dhFormat, fmt, group, sanitizeText, tag } from '../util/xml.js';
 import { ValidationError } from '../errors/index.js';
+import { calcularIbsCbs, somaTributosNoItem, totalIbsCbsXml } from '../rtc/index.js';
 
 export const NFE_NS = 'http://www.portalfiscal.inf.br/nfe';
 export const HOMOLOG_TXT = 'NOTA FISCAL EMITIDA EM AMBIENTE DE HOMOLOGACAO - SEM VALOR FISCAL';
@@ -157,6 +158,12 @@ export function montarNfce(nota: NotaNfce, ctx: BuildContext): NfceMontada {
 
   const tot: Totais = { vProd: 0, vDesc: 0, vFrete: 0, vSeg: 0, vOutro: 0, vBC: 0, vICMS: 0, vICMSDeson: 0, vPIS: 0, vCOFINS: 0, vTotTrib: 0, vNF: 0 };
 
+  const local = new Date(emissao.getTime() + ctx.offsetMinutes * 60000);
+  const anoEmissao = local.getUTCFullYear();
+  const dataEmissao = dhEmi.slice(0, 10);
+  const rtc = { vBC: 0, vIBSUF: 0, vIBSMun: 0, vIBS: 0, vCBS: 0, vNFTot: 0 };
+  let temIbsCbs = false;
+
   const dets = nota.itens.map((it: Item, idx) => {
     const vProd = r2(it.quantidade * it.valorUnitario);
     const vDesc = r2(it.desconto ?? 0);
@@ -174,16 +181,40 @@ export function montarNfce(nota: NotaNfce, ctx: BuildContext): NfceMontada {
       vDesc ? tag('vDesc', fmt.money(vDesc)) : '', vOutro ? tag('vOutro', fmt.money(vOutro)) : '', tag('indTot', 1),
     ]);
     if (it.valorTributosAprox) tot.vTotTrib += it.valorTributosAprox;
+    const antes = { vICMS: tot.vICMS, vPIS: tot.vPIS, vCOFINS: tot.vCOFINS };
+    const icms = group('ICMS', icmsXml(it.icms, base, tot));
+    const pis = pisCofinsXml('PIS', it.pis, base, tot);
+    const cofins = pisCofinsXml('COFINS', it.cofins, base, tot);
+    let ibsCbsXml = '';
+    let vItem = '';
+    if (it.ibsCbs) {
+      temIbsCbs = true;
+      const c = calcularIbsCbs(it.ibsCbs, {
+        vProd, vDesc, vFrete, vSeg, vOutro, vFCP: 0,
+        vICMS: r2(tot.vICMS - antes.vICMS), vPIS: r2(tot.vPIS - antes.vPIS), vCOFINS: r2(tot.vCOFINS - antes.vCOFINS),
+      }, { ano: anoEmissao, data: dataEmissao }, `itens[${idx}].ibsCbs`);
+      ibsCbsXml = c.xml;
+      rtc.vBC += c.vBC; rtc.vIBSUF += c.vIBSUF; rtc.vIBSMun += c.vIBSMun; rtc.vIBS += c.vIBS; rtc.vCBS += c.vCBS;
+      // VB01-10: vItem = vProd − vDesc + vFrete + vSeg + vOutro (+ vIBS + vCBS a partir de 2027).
+      const vi = r2(base + (somaTributosNoItem(anoEmissao) ? c.vIBS + c.vCBS : 0));
+      rtc.vNFTot += vi;
+      vItem = tag('vItem', fmt.money(vi));
+    }
     const imposto = group('imposto', [
       it.valorTributosAprox !== undefined ? tag('vTotTrib', fmt.money(it.valorTributosAprox)) : '',
-      group('ICMS', icmsXml(it.icms, base, tot)),
-      pisCofinsXml('PIS', it.pis, base, tot),
-      pisCofinsXml('COFINS', it.cofins, base, tot),
+      icms, pis, cofins, ibsCbsXml,
     ]);
-    return group('det', [prod, imposto, tag('infAdProd', it.informacoesAdicionais && sanitizeText(it.informacoesAdicionais))], { nItem: String(idx + 1) });
+    return group('det', [prod, imposto, tag('infAdProd', it.informacoesAdicionais && sanitizeText(it.informacoesAdicionais)), vItem], { nItem: String(idx + 1) });
   });
 
-  for (const k of Object.keys(tot) as (keyof Totais)[]) tot[k] = r2(tot[k]);
+  for (const k of ['vProd', 'vDesc', 'vFrete', 'vSeg', 'vOutro', 'vBC', 'vICMS', 'vICMSDeson', 'vPIS', 'vCOFINS', 'vTotTrib'] as const) tot[k] = r2(tot[k]);
+  if (temIbsCbs && nota.itens.some((it) => !it.ibsCbs)) {
+    throw new ValidationError('Informe ibsCbs em todos os itens (ou em nenhum): o total IBSCBSTot exige consistência entre os itens.', ['itens']);
+  }
+  if (temIbsCbs) {
+    for (const k of Object.keys(rtc) as (keyof typeof rtc)[]) rtc[k] = r2(rtc[k]);
+    tot.ibsCbs = rtc;
+  }
   tot.vNF = r2(tot.vProd - tot.vDesc + tot.vFrete + tot.vSeg + tot.vOutro);
   const pago = r2(nota.pagamentos.reduce((s, p) => s + p.valor, 0));
   const troco = r2(pago - tot.vNF);
@@ -192,8 +223,11 @@ export function montarNfce(nota: NotaNfce, ctx: BuildContext): NfceMontada {
   const ide = group('ide', [
     tag('cUF', cUF), tag('cNF', cNF), tag('natOp', sanitizeText(nota.naturezaOperacao ?? 'VENDA AO CONSUMIDOR')), tag('mod', 65),
     tag('serie', nota.serie), tag('nNF', nota.numero), tag('dhEmi', dhEmi), tag('tpNF', 1), tag('idDest', 1),
-    tag('cMunFG', e.endereco.codigoMunicipio), tag('tpImp', 4), tag('tpEmis', ctx.tpEmis), tag('cDV', cDV), tag('tpAmb', tpAmb),
-    tag('finNFe', 1), tag('indFinal', 1), tag('indPres', ind), tag('procEmi', 0), tag('verProc', ctx.verProc ?? nota.versaoSoftware ?? 'zexon-nfce 0.1'),
+    tag('cMunFG', e.endereco.codigoMunicipio),
+    // B25b-60/70: cMunFGIBS é obrigatório na NFC-e com indPres=5 e proibido nos demais casos.
+    ind === 5 ? tag('cMunFGIBS', nota.municipioFatoGerador ?? e.endereco.codigoMunicipio) : '',
+    tag('tpImp', 4), tag('tpEmis', ctx.tpEmis), tag('cDV', cDV), tag('tpAmb', tpAmb),
+    tag('finNFe', 1), tag('indFinal', 1), tag('indPres', ind), tag('procEmi', 0), tag('verProc', ctx.verProc ?? nota.versaoSoftware ?? 'zexon-nfce 0.2'),
     ctx.tpEmis === 9 ? tag('dhCont', dhFormat(ctx.dhCont ?? emissao, ctx.offsetMinutes)) : '',
     ctx.tpEmis === 9 ? tag('xJust', sanitizeText(ctx.xJust ?? 'Contingencia off-line por indisponibilidade de comunicacao')) : '',
   ]);
@@ -233,7 +267,7 @@ export function montarNfce(nota: NotaNfce, ctx: BuildContext): NfceMontada {
     tag('vII', fmt.money(0)), tag('vIPI', fmt.money(0)), tag('vIPIDevol', fmt.money(0)), tag('vPIS', fmt.money(tot.vPIS)),
     tag('vCOFINS', fmt.money(tot.vCOFINS)), tag('vOutro', fmt.money(tot.vOutro)), tag('vNF', fmt.money(tot.vNF)),
     tot.vTotTrib ? tag('vTotTrib', fmt.money(tot.vTotTrib)) : '',
-  ]));
+  ]) + (tot.ibsCbs ? totalIbsCbsXml(tot.ibsCbs) + tag('vNFTot', fmt.money(tot.ibsCbs.vNFTot)) : ''));
 
   const rt = nota.responsavelTecnico;
   const infRespTec = rt

@@ -19,6 +19,7 @@ if (r.status === 'autorizada') await imprimir(await nfce.danfcePdf(r.xmlAutoriza
 - [Primeiros passos](#primeiros-passos)
 - [Montando a nota](#montando-a-nota)
 - [Rotina diária (API)](#rotina-diária-api)
+- [Reforma tributária (IBS/CBS)](#reforma-tributária-ibscbs)
 - [Contingência offline](#contingência-offline)
 - [DANFCE](#danfce)
 - [Armazenamento dos XMLs](#armazenamento-dos-xmls)
@@ -35,7 +36,7 @@ if (r.status === 'autorizada') await imprimir(await nfce.danfcePdf(r.xmlAutoriza
 
 ## Situação do projeto
 
-> **Versão 0.1 — pronta para homologação de emitentes do Simples Nacional.**
+> **Versão 0.2 — pronta para homologação (Simples Nacional e Regime Normal com IBS/CBS).**
 > Ainda não testada contra uma SEFAZ real; os testes usam uma SEFAZ simulada e os XSDs oficiais.
 
 | Tema | Situação |
@@ -46,7 +47,8 @@ if (r.status === 'autorizada') await imprimir(await nfce.danfcePdf(r.xmlAutoriza
 | DANFCE em HTML e PDF (80 mm) | ✅ Implementado |
 | XML validado contra o XSD oficial (PL_010h) | ✅ Coberto por testes |
 | **Reforma tributária (IBS/CBS)** — Simples Nacional / MEI (CRT 1, 2, 4) | ✅ Não exigido até 2027 (NT 2025.002) |
-| **Reforma tributária (IBS/CBS)** — Regime Normal (CRT 3) | ❌ **Pendente.** Exigido por lei desde 01/01/2026; em homologação a SEFAZ rejeita sem o grupo `IBSCBS` (rejeição 1115) desde 01/07/2026 |
+| **Reforma tributária (IBS/CBS)** — Regime Normal (CRT 3) | ✅ Grupo `IBSCBS` por item, redução de alíquota, `IBSCBSTot`, `vItem`, `vNFTot` (NT 2025.002 v1.53; tabela cClassTrib v1.71) |
+| IBS/CBS: diferimento, crédito presumido, monofásico (combustíveis), compras governamentais | ❌ Fora do escopo (raros ou proibidos em NFC-e) |
 | ICMS-ST (CST 10/30/70), IPI, ISSQN, Imposto Seletivo | ❌ Fora do escopo da v0.1 |
 | URLs de todas as UFs | ⚠️ Parcial: SP, MG, PR e UFs atendidas pela SVRS. As demais precisam ser informadas em `endpoints` |
 
@@ -149,6 +151,7 @@ switch (r.status) {
 | `icms` | sim | ver abaixo |
 | `pis`, `cofins` | não | padrão: CST 49 com valores zerados |
 | `valorTributosAprox` | não | Lei 12.741/2012, somado no total e impresso no DANFCE |
+| `ibsCbs` | CRT 3 | `{ cClassTrib, aliquota*?, baseCalculo?, doacao? }` — ver [Reforma tributária](#reforma-tributária-ibscbs) |
 
 ### ICMS suportado
 
@@ -216,6 +219,50 @@ await nfce.inutilizar({ serie: 1, numeroInicial: 4830, numeroFinal: 4835, justif
 // Conferir uma nota
 const c = await nfce.consultar('35261111222333000181650010000048211499370670');
 ```
+
+---
+
+## Reforma tributária (IBS/CBS)
+
+Implementação conforme a **NT 2025.002-RTC v1.53** e a **tabela oficial de cClassTrib (IT 2025.002 v1.71)**, embutida na biblioteca com os 40 códigos permitidos em NFC-e.
+
+**Quem precisa informar**
+
+| Emitente | Obrigação |
+|---|---|
+| Regime Normal (CRT 3) | Obrigatório por lei desde 01/01/2026. Em homologação, a SEFAZ rejeita a nota sem o grupo (rejeição 1115) desde 01/07/2026; em produção a rejeição será ativada depois. A biblioteca **bloqueia o envio** se faltar. |
+| Simples Nacional / MEI (CRT 1, 2, 4) | Só a partir de 2027 (NT futura). Hoje é opcional. |
+
+**Uso**: informe só o `cClassTrib`; CST, alíquotas e valores são calculados.
+
+```ts
+// Em todos os itens que não informarem ibsCbs
+new NfceClient({ /* ... */ ibsCbsPadrao: { cClassTrib: '000001' } }); // tributação integral
+
+// Por item
+.item({ /* ... */ ibsCbs: { cClassTrib: '200034' } })              // alimentos: redução de 60%
+.item({ /* ... */ ibsCbs: { cClassTrib: '200003' } })              // cesta básica: redução de 100%
+.item({ /* ... */ ibsCbs: { cClassTrib: '410999' } })              // não incidência
+.item({ /* ... */ ibsCbs: { cClassTrib: '410003', doacao: true } }) // doação/amostra grátis
+```
+
+**O que a biblioteca calcula**
+
+- **Base (UB16-10):** vProd + vFrete + vSeg + vOutro − vDesc − vPIS − vCOFINS − vICMS − vFCP (pode ser sobrescrita com `baseCalculo`).
+- **Alíquotas padrão por ano de emissão:**
+
+  | Ano | IBS UF | IBS Mun | CBS |
+  |---|---|---|---|
+  | 2026 | 0,1% | 0% | 0,9% |
+  | 2027–2028 | 0,05% | 0,05% | informar (aguarda legislação) |
+
+  Outros valores podem ser informados em `aliquotaIBSUF`, `aliquotaIBSMun` e `aliquotaCBS`.
+- **Redução de alíquota (`gRed`):** percentual tirado da tabela do cClassTrib; alíquota efetiva com 4 casas (UB28/UB66).
+- **Totais:** `IBSCBSTot`, `vItem` por item e `vNFTot`. Até 2026 o IBS/CBS **não** soma em `vItem`/`vNFTot`; a partir de 2027 soma (VB01-10).
+- **Validações:** cClassTrib existente e permitido em NFC-e, vigência, indicador de doação, CSTs com grupos não suportados.
+- **`cMunFGIBS`:** informado automaticamente quando `presenca(5)` (venda presencial fora do estabelecimento), usando `municipioFatoGerador` ou o município do emitente (regras B25b-60/70).
+
+> O DANFCE ainda não exibe IBS/CBS: a NT informa que o novo leiaute do DANFE está "em estudo".
 
 ---
 
@@ -297,6 +344,7 @@ interface Storage {
 | `responsavelTecnico` | `{ cnpj, contato, email, fone, csrt? }` | grupo `infRespTec` (+ hash CSRT) |
 | `versaoSoftware` | `string` | vai em `verProc` |
 | `fusoMinutos` | `number` | padrão pelo fuso da UF (ex.: −180, AM −240, AC −300) |
+| `ibsCbsPadrao` | `{ cClassTrib, ... }` | IBS/CBS aplicado aos itens sem `ibsCbs` |
 
 ---
 
@@ -391,6 +439,7 @@ src/
   validation/            regras de negócio pré-envio
   xml/                   chave de acesso, montagem do infNFe, assinatura
   qrcode/                QR Code v2/v3 online e offline
+  rtc/                   IBS/CBS: cálculo e tabela oficial de cClassTrib/CST
   sefaz/                 endpoints por UF, SOAP 1.2, parse de retornos
   events/                cancelamento, substituição, inutilização
   danfce/                HTML e PDF
@@ -424,6 +473,7 @@ Portal Nacional da NF-e (nfe.fazenda.gov.br):
 - Manual de Especificações Técnicas do DANFE NFC-e e QR Code, versão 6.0
 - Manual de Especificações da Contingência Offline para NFC-e, versão 2.0
 - NT 2025.002 v1.53 — Reforma Tributária (IBS/CBS/IS)
+- Tabela de Classificação Tributária do IBS e CBS (IT 2025.002 v1.71) e Tabela de Alíquotas da CBS
 - Esquemas XML: pacote PL_010h e PL_009q (serviços), eventos de cancelamento e cancelamento por substituição
 
 ## Licença

@@ -1,4 +1,4 @@
-import type { Ambiente, Certificado, Csc, NotaNfce, ResponsavelTecnico, VersaoQrCode } from '../types.js';
+import type { Ambiente, Certificado, Csc, IbsCbsItem, NotaNfce, ResponsavelTecnico, VersaoQrCode } from '../types.js';
 import { carregarCertificado, certificadoVencido, type CertificadoCarregado } from '../certificate/index.js';
 import { UF_CODIGO, parseChave, validarChave } from '../xml/chave.js';
 import { montarNfce } from '../xml/nfce.js';
@@ -39,6 +39,11 @@ export interface NfceClientConfig {
   contingenciaAutomatica?: boolean;
   /** Sobrescreve o fuso horário (minutos). */
   fusoMinutos?: number;
+  /**
+   * IBS/CBS aplicado aos itens que não informarem `ibsCbs` (ex.: `{ cClassTrib: '000001' }` para tributação integral).
+   * Útil para emitentes do Regime Normal cujos produtos são, em geral, tributados integralmente.
+   */
+  ibsCbsPadrao?: IbsCbsItem;
 }
 
 export type StatusEmissao = 'autorizada' | 'rejeitada' | 'denegada' | 'contingencia';
@@ -140,7 +145,9 @@ export class NfceClient {
    * Monta, assina e gera o QR Code da nota **sem enviar**.
    * Útil para pré-visualização, testes ou para controlar o envio.
    */
-  preparar(nota: NotaNfce, opcoes: { offline?: boolean; motivoContingencia?: string; cNF?: string } = {}) {
+  preparar(notaOriginal: NotaNfce, opcoes: { offline?: boolean; motivoContingencia?: string; cNF?: string } = {}) {
+    const padrao = this.config.ibsCbsPadrao;
+    const nota: NotaNfce = padrao ? { ...notaOriginal, itens: notaOriginal.itens.map((it) => (it.ibsCbs ? it : { ...it, ibsCbs: padrao })) } : notaOriginal;
     validarNota(nota);
     if (nota.emitente.endereco.uf.toUpperCase() !== this.config.uf) throw new ValidationError(`UF do emitente (${nota.emitente.endereco.uf}) diferente da UF do cliente (${this.config.uf})`, ['emitente.endereco.uf']);
     const offline = !!opcoes.offline;
