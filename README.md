@@ -14,10 +14,12 @@ if (r.status === 'autorizada') await imprimir(await nfce.danfcePdf(r.xmlAutoriza
 ## Sumário
 
 - [Situação do projeto](#situação-do-projeto)
+- [Mudanças na v0.6](#mudanças-na-v06)
 - [Mudanças na v0.5](#mudanças-na-v05)
 - [Mudanças na v0.4](#mudanças-na-v04)
 - [Recursos](#recursos)
 - [Instalação](#instalação)
+- [CLI e IAs (`nfce`, MCP, Skill)](#cli-e-ias-nfce-mcp-skill)
 - [Primeiros passos](#primeiros-passos)
 - [Montando a nota](#montando-a-nota)
 - [Rotina diária (API)](#rotina-diária-api)
@@ -39,13 +41,14 @@ if (r.status === 'autorizada') await imprimir(await nfce.danfcePdf(r.xmlAutoriza
 
 ## Situação do projeto
 
-> **Versão 0.5 — pronta para homologação (Simples Nacional e Regime Normal com IBS/CBS), incluindo o Pará (SVRS).**
+> **Versão 0.6 — pronta para homologação (Simples Nacional e Regime Normal com IBS/CBS), incluindo o Pará (SVRS).**
 > Ainda não testada contra uma SEFAZ real; os testes usam uma SEFAZ simulada e os XSDs oficiais.
 
 | Tema | Situação |
 |---|---|
 | Emissão, consulta, cancelamento, inutilização, status | ✅ Implementado |
 | Contingência offline (`tpEmis=9`) e retransmissão | ✅ Implementado |
+| CLI `nfce` para IAs, servidor MCP, Skill e JSON Schemas | ✅ Implementado (modo local: certificado na máquina) |
 | EPEC da NFC-e (`tpEmis=4`, somente SP) | ✅ Implementado a partir da NT 2014.003 — validar na homologação de SP |
 | Emissão resiliente: grava antes de enviar, retentativas, `retomar`, `processarPendentes` | ✅ Implementado |
 | Registro das notas em banco e numeração automática (Postgres incluso) | ✅ Implementado (interfaces abertas para outros bancos) |
@@ -58,6 +61,14 @@ if (r.status === 'autorizada') await imprimir(await nfce.danfcePdf(r.xmlAutoriza
 | IBS/CBS: diferimento, crédito presumido, monofásico (combustíveis), compras governamentais | ❌ Fora do escopo (raros ou proibidos em NFC-e) |
 | ICMS-ST (CST 10/30/70), IPI, ISSQN, Imposto Seletivo | ❌ Fora do escopo |
 | URLs das 27 UFs (serviços, QR Code, consulta) | ✅ Tabela embutida (fonte: sped-nfe) — confira no nfce.encat.org antes de produção |
+
+## Mudanças na v0.6
+
+- **CLI `nfce`** (`npx @zexon/nfce ...`), feita para IAs e scripts: saída sempre em JSON, códigos de saída estáveis, erros por campo com sugestão, homologação por padrão e `--producao` obrigatório para emitir com valor fiscal. Ver [CLI e IAs](#cli-e-ias-nfce-mcp-skill).
+- **Servidor MCP** (`nfce mcp`) com as mesmas operações, **Skill** (`skills/nfce`, instalável com `nfce skill instalar`) e **JSON Schemas** do arquivo da venda e do config (`schemas/cli/`).
+- `FileRegistro` e `FileNumerador`: registro e numeração em arquivo, seguros para chamadas paralelas (usados pela CLI).
+- `ValidationError.detalhes`: um `{ campo, mensagem }` por problema.
+- Novas dependências: `ajv` e `@modelcontextprotocol/sdk`.
 
 ## Mudanças na v0.5
 
@@ -111,6 +122,49 @@ npm install @zexon/nfce
 Requisitos: Node.js 20+, certificado digital **A1** do emitente e **CSC** (se usar QR Code v2), obtido no portal da SEFAZ da sua UF.
 
 ---
+
+## CLI e IAs (`nfce`, MCP, Skill)
+
+A CLI emite **direto na SEFAZ** com o certificado A1 da máquina (modo local). Foi desenhada para agentes de IA: toda saída
+é **um JSON** com `ok` e `proximoPasso`, e o **código de saída** diz o que fazer.
+
+| Saída | Significado |
+|---|---|
+| 0 | ok |
+| 1 | venda inválida — `erros[]` com `campo`, `mensagem` e `sugestao` |
+| 2 | rejeitada pela SEFAZ — `cStat`, `xMotivo`, `dica` |
+| 3 | temporário/pendente — a nota está gravada; rode `nfce pendentes --processar` depois (não emita outra) |
+| 4 | configuração/certificado — rode `nfce doctor` |
+| 5 | uso incorreto (ex.: produção sem `--producao`) |
+
+```bash
+npx @zexon/nfce init --uf SP --cnpj 11222333000181 --razao-social "MINHA LOJA LTDA" --ie 110042490114 --crt 1 \
+  --certificado ./certificado.pfx --csc-id 1          # cria nfce.config.json (sem segredos)
+export NFCE_CERT_SENHA=...  NFCE_CSC=...              # segredos só no ambiente
+npx @zexon/nfce doctor                                # certificado, CSC, endpoints, SEFAZ
+npx @zexon/nfce exemplo pix > venda-123.json          # modelo; o formato completo: nfce schema nota
+npx @zexon/nfce validar venda-123.json                # sem rede, sem certificado
+npx @zexon/nfce emitir venda-123.json --referencia 123   # mesma referência = mesma nota, nunca duas
+npx @zexon/nfce pendentes --processar                 # agende: transmite contingência e pendentes
+```
+
+Outros comandos: `previa`, `contingencia offline|epec`, `consultar`, `status`, `cancelar`, `substituir`, `inutilizar`,
+`buracos`, `reemitir`, `danfce`. Veja `nfce --help`.
+
+- **Arquivo da venda:** só itens, pagamentos e consumidor (emitente, série e UF vêm do config). Schema em
+  [`schemas/cli/nota.schema.json`](schemas/cli/nota.schema.json); config em [`schemas/cli/config.schema.json`](schemas/cli/config.schema.json).
+- **Estado local** em `.nfce/` (XMLs, registro, numeração e DANFCE em PDF), com `.gitignore` próprio.
+- **Segurança:** a senha do certificado e o CSC vêm de variáveis de ambiente (o config guarda só o *nome* da variável) e
+  nunca aparecem na saída. Com `"ambiente": "producao"` no config, cada envio exige `--producao`.
+- **MCP:** `npx @zexon/nfce mcp` (stdio) expõe `nfce_validar`, `nfce_previa`, `nfce_emitir`, `nfce_contingencia`,
+  `nfce_pendentes`, `nfce_consultar`, `nfce_status`, `nfce_cancelar`, `nfce_danfce`, `nfce_doctor`, `nfce_schema` e
+  `nfce_exemplo`. Exemplo de configuração de cliente MCP:
+  ```json
+  { "mcpServers": { "nfce": { "command": "npx", "args": ["-y", "@zexon/nfce", "mcp"], "env": { "NFCE_CONFIG": "/caminho/nfce.config.json" } } } }
+  ```
+  (as variáveis `NFCE_CERT_SENHA`/`NFCE_CSC` devem estar no ambiente do cliente MCP.)
+- **Skill:** `npx @zexon/nfce skill instalar` copia [`skills/nfce`](skills/nfce/SKILL.md) para `.claude/skills/`,
+  com o fluxo, as regras de segurança e referências (formato da venda, tributação, rejeições, contingência, cancelamento).
 
 ## Primeiros passos
 

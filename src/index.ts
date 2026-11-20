@@ -27,6 +27,7 @@ export type { ClassTrib, IndicadoresCst } from './rtc/index.js';
 export { MemoryRegistro, RegistroDuplicadoError, SITUACOES_SEM_NUMERO, SITUACOES_A_RESOLVER } from './registro/index.js';
 export type { RegistroNotas, RegistroNota, SituacaoNota, AtualizacaoRegistro, FiltroPendentes, Inutilizacao } from './registro/index.js';
 export { MemoryNumerador } from './numerador/index.js';
+export { FileRegistro, FileNumerador } from './registro/file.js';
 export type { Numerador, ChaveSequencia } from './numerador/index.js';
 export { PostgresRegistro, PostgresNumerador, criarTabelas, sqlMigracao } from './postgres/index.js';
 export type { ExecutorSql, OpcoesPostgres } from './postgres/index.js';

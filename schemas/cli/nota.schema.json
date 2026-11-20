@@ -1,0 +1,795 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/lenderson00/zexon-nfce/schemas/cli/nota.schema.json",
+  "title": "Venda para NFC-e (arquivo da CLI `nfce`)",
+  "description": "Uma venda a consumidor. Emitente, série, UF e certificado vêm do nfce.config.json — não os repita aqui. Valores em reais.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "itens",
+    "pagamentos"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "numero": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 999999999,
+      "description": "Omita: a CLI numera sozinha (recomendado)."
+    },
+    "serie": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 889,
+      "description": "Omita para usar a série do config."
+    },
+    "emissao": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Omita (agora). Só use para reprocessar uma venda específica."
+    },
+    "itens": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 990,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "codigo",
+          "descricao",
+          "ncm",
+          "cfop",
+          "unidade",
+          "quantidade",
+          "valorUnitario",
+          "icms"
+        ],
+        "properties": {
+          "codigo": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 60,
+            "description": "Código do produto no seu cadastro."
+          },
+          "gtin": {
+            "type": "string",
+            "pattern": "^(\\d{8}|\\d{12,14})$",
+            "description": "Código de barras (EAN/GTIN). Omita se não tiver (\"SEM GTIN\")."
+          },
+          "descricao": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "ncm": {
+            "type": "string",
+            "pattern": "^\\d{8}$",
+            "description": "NCM do produto (8 dígitos). Ex.: 22021000 refrigerante, 21069090 preparações alimentícias."
+          },
+          "cest": {
+            "type": "string",
+            "pattern": "^\\d{7}$",
+            "description": "CEST (só para produtos sujeitos a ST)."
+          },
+          "cfop": {
+            "type": "string",
+            "pattern": "^5\\d{3}$",
+            "description": "CFOP de venda interna. Normalmente 5102 (revenda) ou 5101 (produção própria); 5405 com ST."
+          },
+          "unidade": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 6,
+            "description": "UN, KG, LT, CX..."
+          },
+          "quantidade": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "description": "Até 4 casas decimais."
+          },
+          "valorUnitario": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Preço unitário em reais (até 10 casas; o total do item é arredondado a centavos)."
+          },
+          "desconto": {
+            "type": "number",
+            "minimum": 0,
+            "multipleOf": 0.01,
+            "description": "Desconto do item em reais."
+          },
+          "frete": {
+            "type": "number",
+            "minimum": 0,
+            "multipleOf": 0.01,
+            "description": ""
+          },
+          "seguro": {
+            "type": "number",
+            "minimum": 0,
+            "multipleOf": 0.01,
+            "description": ""
+          },
+          "outrasDespesas": {
+            "type": "number",
+            "minimum": 0,
+            "multipleOf": 0.01,
+            "description": ""
+          },
+          "icms": {
+            "description": "ICMS do item. Simples Nacional (CRT 1/4) usa `csosn` (o mais comum é \"102\"); Regime Normal (CRT 3) usa `cst`.",
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "csosn",
+                  "origem"
+                ],
+                "properties": {
+                  "csosn": {
+                    "enum": [
+                      "102",
+                      "103",
+                      "300",
+                      "400"
+                    ]
+                  },
+                  "origem": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 8,
+                    "description": "Origem da mercadoria (0 = nacional)."
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "csosn",
+                  "origem",
+                  "aliquotaCreditoSN"
+                ],
+                "properties": {
+                  "csosn": {
+                    "const": "101"
+                  },
+                  "origem": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 8,
+                    "description": "Origem da mercadoria (0 = nacional)."
+                  },
+                  "aliquotaCreditoSN": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 100
+                  },
+                  "valorCreditoSN": {
+                    "type": "number",
+                    "minimum": 0,
+                    "multipleOf": 0.01,
+                    "description": "Crédito de ICMS (R$)."
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "csosn",
+                  "origem"
+                ],
+                "properties": {
+                  "csosn": {
+                    "const": "500"
+                  },
+                  "origem": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 8,
+                    "description": "Origem da mercadoria (0 = nacional)."
+                  },
+                  "baseSTRetido": {
+                    "type": "number",
+                    "minimum": 0,
+                    "multipleOf": 0.01,
+                    "description": ""
+                  },
+                  "aliquotaST": {
+                    "type": "number"
+                  },
+                  "valorSTRetido": {
+                    "type": "number",
+                    "minimum": 0,
+                    "multipleOf": 0.01,
+                    "description": ""
+                  },
+                  "valorICMSSubstituto": {
+                    "type": "number",
+                    "minimum": 0,
+                    "multipleOf": 0.01,
+                    "description": ""
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "csosn",
+                  "origem"
+                ],
+                "properties": {
+                  "csosn": {
+                    "const": "900"
+                  },
+                  "origem": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 8,
+                    "description": "Origem da mercadoria (0 = nacional)."
+                  },
+                  "baseCalculo": {
+                    "type": "number",
+                    "minimum": 0,
+                    "multipleOf": 0.01,
+                    "description": ""
+                  },
+                  "aliquota": {
+                    "type": "number"
+                  },
+                  "valor": {
+                    "type": "number",
+                    "minimum": 0,
+                    "multipleOf": 0.01,
+                    "description": ""
+                  },
+                  "aliquotaCreditoSN": {
+                    "type": "number"
+                  },
+                  "valorCreditoSN": {
+                    "type": "number",
+                    "minimum": 0,
+                    "multipleOf": 0.01,
+                    "description": ""
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "cst",
+                  "origem",
+                  "aliquota"
+                ],
+                "properties": {
+                  "cst": {
+                    "const": "00"
+                  },
+                  "origem": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 8,
+                    "description": "Origem da mercadoria (0 = nacional)."
+                  },
+                  "baseCalculo": {
+                    "type": "number",
+                    "minimum": 0,
+                    "multipleOf": 0.01,
+                    "description": ""
+                  },
+                  "aliquota": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 100,
+                    "description": "Alíquota em %."
+                  },
+                  "valor": {
+                    "type": "number",
+                    "minimum": 0,
+                    "multipleOf": 0.01,
+                    "description": ""
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "cst",
+                  "origem",
+                  "reducaoBase",
+                  "aliquota"
+                ],
+                "properties": {
+                  "cst": {
+                    "const": "20"
+                  },
+                  "origem": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 8,
+                    "description": "Origem da mercadoria (0 = nacional)."
+                  },
+                  "baseCalculo": {
+                    "type": "number",
+                    "minimum": 0,
+                    "multipleOf": 0.01,
+                    "description": ""
+                  },
+                  "reducaoBase": {
+                    "type": "number"
+                  },
+                  "aliquota": {
+                    "type": "number"
+                  },
+                  "valor": {
+                    "type": "number",
+                    "minimum": 0,
+                    "multipleOf": 0.01,
+                    "description": ""
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "cst",
+                  "origem"
+                ],
+                "properties": {
+                  "cst": {
+                    "enum": [
+                      "40",
+                      "41",
+                      "50"
+                    ]
+                  },
+                  "origem": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 8,
+                    "description": "Origem da mercadoria (0 = nacional)."
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "cst",
+                  "origem"
+                ],
+                "properties": {
+                  "cst": {
+                    "const": "60"
+                  },
+                  "origem": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 8,
+                    "description": "Origem da mercadoria (0 = nacional)."
+                  },
+                  "baseSTRetido": {
+                    "type": "number",
+                    "minimum": 0,
+                    "multipleOf": 0.01,
+                    "description": ""
+                  },
+                  "aliquotaST": {
+                    "type": "number"
+                  },
+                  "valorSTRetido": {
+                    "type": "number",
+                    "minimum": 0,
+                    "multipleOf": 0.01,
+                    "description": ""
+                  },
+                  "valorICMSSubstituto": {
+                    "type": "number",
+                    "minimum": 0,
+                    "multipleOf": 0.01,
+                    "description": ""
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "cst",
+                  "origem"
+                ],
+                "properties": {
+                  "cst": {
+                    "const": "90"
+                  },
+                  "origem": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 8,
+                    "description": "Origem da mercadoria (0 = nacional)."
+                  },
+                  "baseCalculo": {
+                    "type": "number",
+                    "minimum": 0,
+                    "multipleOf": 0.01,
+                    "description": ""
+                  },
+                  "aliquota": {
+                    "type": "number"
+                  },
+                  "valor": {
+                    "type": "number",
+                    "minimum": 0,
+                    "multipleOf": 0.01,
+                    "description": ""
+                  }
+                }
+              }
+            ]
+          },
+          "pis": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "cst"
+            ],
+            "description": "PIS ou COFINS. Simples Nacional normalmente \"49\" ou omite (padrão da lib). CST 01/02 exigem `aliquota` (%).",
+            "properties": {
+              "cst": {
+                "type": "string",
+                "pattern": "^\\d{2}$",
+                "description": "CST de PIS/COFINS."
+              },
+              "baseCalculo": {
+                "type": "number",
+                "minimum": 0,
+                "multipleOf": 0.01,
+                "description": ""
+              },
+              "aliquota": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100
+              },
+              "valor": {
+                "type": "number",
+                "minimum": 0,
+                "multipleOf": 0.01,
+                "description": ""
+              }
+            }
+          },
+          "cofins": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "cst"
+            ],
+            "description": "PIS ou COFINS. Simples Nacional normalmente \"49\" ou omite (padrão da lib). CST 01/02 exigem `aliquota` (%).",
+            "properties": {
+              "cst": {
+                "type": "string",
+                "pattern": "^\\d{2}$",
+                "description": "CST de PIS/COFINS."
+              },
+              "baseCalculo": {
+                "type": "number",
+                "minimum": 0,
+                "multipleOf": 0.01,
+                "description": ""
+              },
+              "aliquota": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100
+              },
+              "valor": {
+                "type": "number",
+                "minimum": 0,
+                "multipleOf": 0.01,
+                "description": ""
+              }
+            }
+          },
+          "valorTributosAprox": {
+            "type": "number",
+            "minimum": 0,
+            "multipleOf": 0.01,
+            "description": "Tributos aproximados (Lei 12.741/IBPT)."
+          },
+          "ibsCbs": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "cClassTrib"
+            ],
+            "description": "IBS/CBS (reforma tributária). Obrigatório no Regime Normal (CRT 3) desde 2026. Ex.: { \"cClassTrib\": \"000001\" } = tributação integral.",
+            "properties": {
+              "cClassTrib": {
+                "type": "string",
+                "pattern": "^\\d{6}$",
+                "description": "Classificação tributária (6 dígitos)."
+              },
+              "aliquotaIBSUF": {
+                "type": "number"
+              },
+              "aliquotaIBSMun": {
+                "type": "number"
+              },
+              "aliquotaCBS": {
+                "type": "number"
+              },
+              "baseCalculo": {
+                "type": "number",
+                "minimum": 0,
+                "multipleOf": 0.01,
+                "description": ""
+              },
+              "doacao": {
+                "type": "boolean"
+              }
+            }
+          },
+          "informacoesAdicionais": {
+            "type": "string",
+            "maxLength": 500
+          }
+        }
+      }
+    },
+    "pagamentos": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 100,
+      "description": "A soma deve cobrir o total. Troco só com dinheiro (o excedente vira troco).",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "tipo",
+          "valor"
+        ],
+        "properties": {
+          "tipo": {
+            "anyOf": [
+              {
+                "enum": [
+                  "dinheiro",
+                  "cheque",
+                  "cartao_credito",
+                  "cartao_debito",
+                  "credito_loja",
+                  "vale_alimentacao",
+                  "vale_refeicao",
+                  "vale_presente",
+                  "vale_combustivel",
+                  "boleto",
+                  "deposito",
+                  "pix",
+                  "transferencia",
+                  "programa_fidelidade",
+                  "sem_pagamento",
+                  "outros"
+                ]
+              },
+              {
+                "type": "string",
+                "pattern": "^\\d{2}$",
+                "description": "Código tPag."
+              }
+            ],
+            "description": "dinheiro, pix, cartao_credito, cartao_debito, ..."
+          },
+          "valor": {
+            "type": "number",
+            "minimum": 0,
+            "multipleOf": 0.01,
+            "description": "Valor pago neste meio."
+          },
+          "descricao": {
+            "type": "string",
+            "maxLength": 60,
+            "description": "Obrigatório quando tipo = outros."
+          },
+          "cartao": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "integrado"
+            ],
+            "properties": {
+              "integrado": {
+                "type": "boolean",
+                "description": "true se a maquininha é integrada ao sistema (TEF)."
+              },
+              "cnpjCredenciadora": {
+                "type": "string",
+                "pattern": "^\\d{14}$",
+                "description": ""
+              },
+              "bandeira": {
+                "type": "string"
+              },
+              "autorizacao": {
+                "type": "string",
+                "maxLength": 128
+              }
+            }
+          }
+        }
+      }
+    },
+    "consumidor": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Opcional (\"CPF na nota\"). Obrigatório acima de R$ 10.000 ou na entrega em domicílio.",
+      "properties": {
+        "cpf": {
+          "type": "string",
+          "pattern": "^\\d{11}$",
+          "description": "CPF só com dígitos."
+        },
+        "cnpj": {
+          "type": "string",
+          "pattern": "^\\d{14}$",
+          "description": "CNPJ só com dígitos."
+        },
+        "idEstrangeiro": {
+          "type": "string",
+          "maxLength": 20
+        },
+        "nome": {
+          "type": "string",
+          "maxLength": 60
+        },
+        "email": {
+          "type": "string",
+          "format": "email"
+        },
+        "endereco": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "logradouro",
+            "numero",
+            "bairro",
+            "codigoMunicipio",
+            "municipio",
+            "uf",
+            "cep"
+          ],
+          "properties": {
+            "logradouro": {
+              "type": "string",
+              "minLength": 2,
+              "maxLength": 60
+            },
+            "numero": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 60
+            },
+            "complemento": {
+              "type": "string",
+              "maxLength": 60
+            },
+            "bairro": {
+              "type": "string",
+              "minLength": 2,
+              "maxLength": 60
+            },
+            "codigoMunicipio": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "pattern": "^\\d{7}$",
+                  "description": "Código IBGE do município (7 dígitos)."
+                },
+                {
+                  "type": "integer",
+                  "minimum": 1000000,
+                  "maximum": 9999999
+                }
+              ]
+            },
+            "municipio": {
+              "type": "string",
+              "minLength": 2,
+              "maxLength": 60
+            },
+            "uf": {
+              "enum": [
+                "AC",
+                "AL",
+                "AM",
+                "AP",
+                "BA",
+                "CE",
+                "DF",
+                "ES",
+                "GO",
+                "MA",
+                "MG",
+                "MS",
+                "MT",
+                "PA",
+                "PB",
+                "PE",
+                "PI",
+                "PR",
+                "RJ",
+                "RN",
+                "RO",
+                "RR",
+                "RS",
+                "SC",
+                "SE",
+                "SP",
+                "TO"
+              ]
+            },
+            "cep": {
+              "type": "string",
+              "pattern": "^\\d{5}-?\\d{3}$",
+              "description": "CEP (8 dígitos)."
+            },
+            "fone": {
+              "type": "string",
+              "pattern": "^\\d{6,14}$"
+            }
+          }
+        }
+      }
+    },
+    "indicadorPresenca": {
+      "enum": [
+        1,
+        4,
+        5
+      ],
+      "description": "1 presencial (padrão), 4 entrega em domicílio, 5 presencial fora do estabelecimento."
+    },
+    "naturezaOperacao": {
+      "type": "string",
+      "maxLength": 60
+    },
+    "informacoesComplementares": {
+      "type": "string",
+      "maxLength": 2000
+    }
+  },
+  "examples": [
+    {
+      "itens": [
+        {
+          "codigo": "001",
+          "descricao": "REFRIGERANTE LATA 350ML",
+          "ncm": "22021000",
+          "cfop": "5102",
+          "unidade": "UN",
+          "quantidade": 2,
+          "valorUnitario": 5.5,
+          "icms": {
+            "csosn": "102",
+            "origem": 0
+          }
+        }
+      ],
+      "pagamentos": [
+        {
+          "tipo": "pix",
+          "valor": 11
+        }
+      ]
+    }
+  ]
+}

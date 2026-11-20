@@ -19,7 +19,12 @@ export class NfceError extends Error {
 
 /** Dados da nota inválidos (detectado antes do envio). */
 export class ValidationError extends NfceError {
-  constructor(message: string, public readonly campos: string[] = []) {
+  constructor(
+    message: string,
+    public readonly campos: string[] = [],
+    /** Um problema por campo (mesma ordem de `campos`), quando a validação os detalha. */
+    public readonly detalhes: Array<{ campo: string; mensagem: string }> = [],
+  ) {
     super(message, 'VALIDATION');
   }
 }

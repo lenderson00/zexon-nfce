@@ -99,5 +99,5 @@ export function validarNota(n: NotaNfce, opcoes: { exigirIbsCbs?: boolean } = {}
     if (!(p.tipo in TPAG) && !/^\d{2}$/.test(p.tipo)) add(`pagamentos[${i}].tipo`, `meio de pagamento desconhecido: ${p.tipo}`);
   });
 
-  if (erros.length) throw new ValidationError(`Nota inválida:\n${erros.map(([c, m]) => `  - ${c}: ${m}`).join('\n')}`, erros.map(([c]) => c));
+  if (erros.length) throw new ValidationError(`Nota inválida:\n${erros.map(([c, m]) => `  - ${c}: ${m}`).join('\n')}`, erros.map(([c]) => c), erros.map(([campo, mensagem]) => ({ campo, mensagem })));
 }

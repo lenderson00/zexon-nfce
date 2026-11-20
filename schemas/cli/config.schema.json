@@ -1,0 +1,278 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/lenderson00/zexon-nfce/schemas/cli/config.schema.json",
+  "title": "Configuração da CLI `nfce` (nfce.config.json)",
+  "description": "Dados do emitente e do ambiente. NUNCA coloque senha do certificado ou CSC aqui: informe o NOME da variável de ambiente.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "uf",
+    "ambiente",
+    "serie",
+    "emitente",
+    "certificado"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "uf": {
+      "enum": [
+        "AC",
+        "AL",
+        "AM",
+        "AP",
+        "BA",
+        "CE",
+        "DF",
+        "ES",
+        "GO",
+        "MA",
+        "MG",
+        "MS",
+        "MT",
+        "PA",
+        "PB",
+        "PE",
+        "PI",
+        "PR",
+        "RJ",
+        "RN",
+        "RO",
+        "RR",
+        "RS",
+        "SC",
+        "SE",
+        "SP",
+        "TO"
+      ]
+    },
+    "ambiente": {
+      "enum": [
+        "homologacao",
+        "producao"
+      ],
+      "description": "Comece em homologação. Produção exige também a flag --producao em cada emissão."
+    },
+    "serie": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 889
+    },
+    "emitente": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cnpj",
+        "razaoSocial",
+        "inscricaoEstadual",
+        "regimeTributario",
+        "endereco"
+      ],
+      "properties": {
+        "cnpj": {
+          "type": "string",
+          "pattern": "^\\d{14}$",
+          "description": "CNPJ do estabelecimento."
+        },
+        "razaoSocial": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 60
+        },
+        "nomeFantasia": {
+          "type": "string",
+          "maxLength": 60
+        },
+        "inscricaoEstadual": {
+          "type": "string",
+          "pattern": "^(\\d{2,14}|ISENTO)$"
+        },
+        "inscricaoMunicipal": {
+          "type": "string"
+        },
+        "cnae": {
+          "type": "string",
+          "pattern": "^\\d{7}$",
+          "description": ""
+        },
+        "regimeTributario": {
+          "enum": [
+            1,
+            2,
+            3,
+            4
+          ],
+          "description": "1 Simples Nacional, 2 Simples (excesso de sublimite), 3 Regime Normal, 4 MEI."
+        },
+        "endereco": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "logradouro",
+            "numero",
+            "bairro",
+            "codigoMunicipio",
+            "municipio",
+            "uf",
+            "cep"
+          ],
+          "properties": {
+            "logradouro": {
+              "type": "string",
+              "minLength": 2,
+              "maxLength": 60
+            },
+            "numero": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 60
+            },
+            "complemento": {
+              "type": "string",
+              "maxLength": 60
+            },
+            "bairro": {
+              "type": "string",
+              "minLength": 2,
+              "maxLength": 60
+            },
+            "codigoMunicipio": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "pattern": "^\\d{7}$",
+                  "description": "Código IBGE do município (7 dígitos)."
+                },
+                {
+                  "type": "integer",
+                  "minimum": 1000000,
+                  "maximum": 9999999
+                }
+              ]
+            },
+            "municipio": {
+              "type": "string",
+              "minLength": 2,
+              "maxLength": 60
+            },
+            "uf": {
+              "enum": [
+                "AC",
+                "AL",
+                "AM",
+                "AP",
+                "BA",
+                "CE",
+                "DF",
+                "ES",
+                "GO",
+                "MA",
+                "MG",
+                "MS",
+                "MT",
+                "PA",
+                "PB",
+                "PE",
+                "PI",
+                "PR",
+                "RJ",
+                "RN",
+                "RO",
+                "RR",
+                "RS",
+                "SC",
+                "SE",
+                "SP",
+                "TO"
+              ]
+            },
+            "cep": {
+              "type": "string",
+              "pattern": "^\\d{5}-?\\d{3}$",
+              "description": "CEP (8 dígitos)."
+            },
+            "fone": {
+              "type": "string",
+              "pattern": "^\\d{6,14}$"
+            }
+          }
+        }
+      }
+    },
+    "certificado": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "arquivo"
+      ],
+      "properties": {
+        "arquivo": {
+          "type": "string",
+          "description": "Caminho do .pfx A1 (relativo ao config). Não o coloque no git."
+        },
+        "senhaEnv": {
+          "type": "string",
+          "pattern": "^[A-Z_][A-Z0-9_]*$",
+          "default": "NFCE_CERT_SENHA",
+          "description": "Nome da variável de ambiente com a senha."
+        }
+      }
+    },
+    "csc": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id"
+      ],
+      "description": "CSC do QR Code v2. Sem ele, usa o QR Code v3 (só onde a UF aceita).",
+      "properties": {
+        "id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "codigoEnv": {
+          "type": "string",
+          "pattern": "^[A-Z_][A-Z0-9_]*$",
+          "default": "NFCE_CSC"
+        }
+      }
+    },
+    "dados": {
+      "type": "string",
+      "default": ".nfce",
+      "description": "Pasta do estado local (XMLs, registro, numeração, DANFCE)."
+    },
+    "contingenciaAutomatica": {
+      "type": "boolean",
+      "default": true,
+      "description": "Emite offline automaticamente quando é certo que a SEFAZ não recebeu."
+    },
+    "prazoContingencia": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "horas": {
+          "type": "number",
+          "minimum": 1
+        },
+        "alertaHoras": {
+          "type": "number",
+          "minimum": 1
+        }
+      }
+    },
+    "versaoSoftware": {
+      "type": "string",
+      "maxLength": 20
+    },
+    "casAdicionaisDir": {
+      "type": "string",
+      "description": "Pasta com a cadeia ICP-Brasil (PEM/DER) dos servidores da SEFAZ."
+    },
+    "timeoutMs": {
+      "type": "integer",
+      "minimum": 1000
+    }
+  }
+}

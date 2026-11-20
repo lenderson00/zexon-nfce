@@ -168,6 +168,19 @@ export class MemoryRegistro implements RegistroNotas {
       .map((n) => ({ ...n }));
   }
 
+  /** Estado completo (para persistir, ex.: `FileRegistro`). */
+  exportar(): { notas: RegistroNota[]; inutilizacoes: Inutilizacao[] } {
+    return { notas: this.todas(), inutilizacoes: this.inutilizacoes.map((i) => ({ ...i })) };
+  }
+
+  /** Recria o registro a partir de `exportar()`. */
+  static importar(d: { notas?: RegistroNota[]; inutilizacoes?: Inutilizacao[] }): MemoryRegistro {
+    const r = new MemoryRegistro();
+    for (const n of d.notas ?? []) r.notas.set(n.chave, { ...n });
+    r.inutilizacoes = (d.inutilizacoes ?? []).map((i) => ({ ...i }));
+    return r;
+  }
+
   /** Todas as notas (inspeção em testes). */
   todas(): RegistroNota[] {
     return [...this.notas.values()].map((n) => ({ ...n }));
