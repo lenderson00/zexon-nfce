@@ -124,7 +124,7 @@ export async function gerarDanfcePdf(xml: string, op: DanfceOpcoes = {}): Promis
       doc.text(r, M + inner * 0.6, y, { width: inner * 0.4, align: 'right' });
       doc.y = Math.max(y2, doc.y);
     };
-    const line = () => { doc.moveDown(0.2); doc.moveTo(M, doc.y).lineTo(W - M, doc.y).dash(2, { space: 2 }).stroke().undash(); doc.moveDown(0.3); };
+    const line = () => { doc.font('Courier').fontSize(8); doc.moveDown(0.25); doc.moveTo(M, doc.y).lineTo(W - M, doc.y).dash(2, { space: 2 }).stroke().undash(); doc.moveDown(0.5); };
     doc.y = M;
     center(d.emitente.nome, 9, true);
     center(`CNPJ ${cnpjFmt(d.emitente.cnpj)}${d.emitente.ie ? ' IE ' + d.emitente.ie : ''}`);
@@ -155,7 +155,7 @@ export async function gerarDanfcePdf(xml: string, op: DanfceOpcoes = {}): Promis
     line();
     center(d.consumidor ? `CONSUMIDOR - ${d.consumidor}` : 'CONSUMIDOR NÃO IDENTIFICADO');
     line();
-    if (qrPng) { const s = mm(36); doc.image(qrPng, (W - s) / 2, doc.y, { width: s, height: s }); doc.y += s + 4; }
+    if (qrPng) { const s = mm(36); const y0 = doc.y; doc.image(qrPng, (W - s) / 2, y0, { width: s, height: s }); doc.y = y0 + s + 6; }
     if (d.protocolo) { center(`Protocolo de autorização: ${d.protocolo}`); center(`Data de autorização: ${fmtData(d.dhAutorizacao ?? '')}`); }
     if (op.rodape) { line(); center(op.rodape); }
   };
@@ -165,7 +165,7 @@ export async function gerarDanfcePdf(xml: string, op: DanfceOpcoes = {}): Promis
   medir.addPage({ size: [W, 6000], margin: 0 });
   medir.on('data', () => {});
   render(medir);
-  const altura = Math.ceil(medir.y + M);
+  const altura = Math.ceil(medir.y + 2 * M);
   medir.end();
 
   const doc = new PDFDocument({ autoFirstPage: false, info: { Title: `NFC-e ${d.numero}` } });
