@@ -24,6 +24,7 @@ export const tabela = (nome: string, o: OpcoesPostgres = {}) => (o.schema ? `${i
 export function sqlMigracao(o: OpcoesPostgres = {}): string {
   const seq = tabela('nfce_sequencia', o);
   const nota = tabela('nfce_nota', o);
+  const inut = tabela('nfce_inutilizacao', o);
   return `
 CREATE TABLE IF NOT EXISTS ${seq} (
   cnpj          varchar(14) NOT NULL,
@@ -59,7 +60,24 @@ CREATE TABLE IF NOT EXISTS ${nota} (
   atualizada_em  timestamptz   NOT NULL DEFAULT now()
 );
 
+-- v0.4: dados do cancelamento
+ALTER TABLE ${nota} ADD COLUMN IF NOT EXISTS protocolo_cancelamento text;
+ALTER TABLE ${nota} ADD COLUMN IF NOT EXISTS cancelada_em timestamptz;
+
 CREATE UNIQUE INDEX IF NOT EXISTS nfce_nota_referencia_uk ON ${nota} (cnpj, ambiente, referencia) WHERE referencia IS NOT NULL;
+-- Um número só pode ter uma nota que o ocupe (rejeitadas e descartadas não ocupam o número).
+CREATE UNIQUE INDEX IF NOT EXISTS nfce_nota_numero_uk ON ${nota} (cnpj, ambiente, serie, numero) WHERE situacao NOT IN ('rejeitada', 'descartada');
+
+CREATE TABLE IF NOT EXISTS ${inut} (
+  cnpj       varchar(14) NOT NULL,
+  ambiente   smallint    NOT NULL,
+  serie      integer     NOT NULL,
+  inicio     bigint      NOT NULL,
+  fim        bigint      NOT NULL,
+  protocolo  text,
+  criada_em  timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (cnpj, ambiente, serie, inicio)
+);
 CREATE INDEX IF NOT EXISTS nfce_nota_situacao_idx ON ${nota} (situacao, criada_em);
 CREATE INDEX IF NOT EXISTS nfce_nota_numero_idx ON ${nota} (cnpj, ambiente, serie, numero);
 `;

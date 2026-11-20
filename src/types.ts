@@ -159,4 +159,6 @@ export interface Totais {
   vBC: number; vICMS: number; vICMSDeson: number; vPIS: number; vCOFINS: number; vTotTrib: number; vNF: number;
   /** Presente quando algum item tem IBS/CBS. */
   ibsCbs?: { vBC: number; vIBSUF: number; vIBSMun: number; vIBS: number; vCBS: number; vNFTot: number };
+  /** Os mesmos totais principais em centavos inteiros (fonte exata; os campos acima são a conversão para reais). */
+  centavos?: { vProd: number; vDesc: number; vNF: number; troco: number };
 }

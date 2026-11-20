@@ -7,6 +7,7 @@
 import { CCLASSTRIB_NFCE, CST_IBSCBS, type ClassTrib } from './tabela.js';
 import { ValidationError } from '../errors/index.js';
 import { fmt, group, tag } from '../util/xml.js';
+import { aliquotaEfetiva, aplicarAliquota, centavosParaXml, paraUnidades, reaisParaCentavos, unidadesParaTexto } from '../util/dinheiro.js';
 
 export { CCLASSTRIB_NFCE, CST_IBSCBS } from './tabela.js';
 export type { ClassTrib, IndicadoresCst } from './tabela.js';
@@ -39,22 +40,20 @@ export function classTrib(cClassTrib: string): ClassTrib {
   return ct;
 }
 
-/** Valores do item já tributados por ICMS/PIS/COFINS, usados na base (UB16-10). */
+/** Valores do item (em **centavos**) já tributados por ICMS/PIS/COFINS, usados na base (UB16-10). */
 export interface BaseItem { vProd: number; vDesc: number; vFrete: number; vSeg: number; vOutro: number; vICMS: number; vFCP: number; vPIS: number; vCOFINS: number }
 
 export interface IbsCbsCalculado {
   xml: string;
   /** Item possui o grupo gIBSCBS (valores). */
   temValores: boolean;
+  /** Valores em centavos. */
   vBC: number; vIBSUF: number; vIBSMun: number; vIBS: number; vCBS: number;
 }
 
-const r2 = (v: number) => Math.round((v + Number.EPSILON) * 100) / 100;
-const r4 = (v: number) => Math.round((v + Number.EPSILON) * 10000) / 10000;
-
-/** UB16-10: vProd + vFrete + vSeg + vOutro − vDesc − vPIS − vCOFINS − vICMS − vFCP. */
+/** UB16-10 (em centavos): vProd + vFrete + vSeg + vOutro − vDesc − vPIS − vCOFINS − vICMS − vFCP. */
 export function baseIbsCbs(b: BaseItem): number {
-  return r2(b.vProd + b.vFrete + b.vSeg + b.vOutro - b.vDesc - b.vPIS - b.vCOFINS - b.vICMS - b.vFCP);
+  return b.vProd + b.vFrete + b.vSeg + b.vOutro - b.vDesc - b.vPIS - b.vCOFINS - b.vICMS - b.vFCP;
 }
 
 /** Monta o grupo `<IBSCBS>` do item e calcula os valores. */
@@ -85,43 +84,47 @@ export function calcularIbsCbs(i: IbsCbsItem, base: BaseItem, emissao: { ano: nu
     throw new ValidationError(`Alíquotas do IBS/CBS para ${emissao.ano} não definidas na biblioteca: informe aliquotaIBSUF, aliquotaIBSMun e aliquotaCBS.`, [campo]);
   }
 
-  const vBC = r2(i.baseCalculo ?? baseIbsCbs(base));
+  const vBC = i.baseCalculo !== undefined ? reaisParaCentavos(i.baseCalculo) : baseIbsCbs(base);
+  // Alíquotas em inteiros de 4 casas; a efetiva (com redução) arredonda em 4 casas (UB28/UB66).
   const comRed = (p: number, red: number) => {
-    if (!ind.gRed) return { efet: p, xml: '' };
-    const efet = r4(p * (1 - red / 100));
-    return { efet, xml: group('gRed', [tag('pRedAliq', fmt.dec(red, 4)), tag('pAliqEfet', fmt.dec(efet, 4))]) };
+    if (!ind.gRed) return { efet: paraUnidades(p, 4), xml: '' };
+    const efet = aliquotaEfetiva(p, red);
+    return { efet, xml: group('gRed', [tag('pRedAliq', fmt.dec(red, 4)), tag('pAliqEfet', unidadesParaTexto(efet, 4))]) };
   };
   const uf = comRed(pUF, ct.pRedIBS);
   const mun = comRed(pMun, ct.pRedIBS);
   const cbs = comRed(pCBS, ct.pRedCBS);
-  const vIBSUF = r2((vBC * uf.efet) / 100);
-  const vIBSMun = r2((vBC * mun.efet) / 100);
-  const vIBS = r2(vIBSUF + vIBSMun);
-  const vCBS = r2((vBC * cbs.efet) / 100);
+  const vIBSUF = aplicarAliquota(vBC, uf.efet);
+  const vIBSMun = aplicarAliquota(vBC, mun.efet);
+  const vIBS = vIBSUF + vIBSMun;
+  const vCBS = aplicarAliquota(vBC, cbs.efet);
+  const X = centavosParaXml;
 
   const g = group('gIBSCBS', [
-    tag('vBC', fmt.money(vBC)),
-    group('gIBSUF', [tag('pIBSUF', fmt.dec(pUF, 4)), uf.xml, tag('vIBSUF', fmt.money(vIBSUF))]),
-    group('gIBSMun', [tag('pIBSMun', fmt.dec(pMun, 4)), mun.xml, tag('vIBSMun', fmt.money(vIBSMun))]),
-    tag('vIBS', fmt.money(vIBS)),
-    group('gCBS', [tag('pCBS', fmt.dec(pCBS, 4)), cbs.xml, tag('vCBS', fmt.money(vCBS))]),
+    tag('vBC', X(vBC)),
+    group('gIBSUF', [tag('pIBSUF', fmt.dec(pUF, 4)), uf.xml, tag('vIBSUF', X(vIBSUF))]),
+    group('gIBSMun', [tag('pIBSMun', fmt.dec(pMun, 4)), mun.xml, tag('vIBSMun', X(vIBSMun))]),
+    tag('vIBS', X(vIBS)),
+    group('gCBS', [tag('pCBS', fmt.dec(pCBS, 4)), cbs.xml, tag('vCBS', X(vCBS))]),
   ]);
   return { xml: group('IBSCBS', [...cab, g]), temValores: true, vBC, vIBSUF, vIBSMun, vIBS, vCBS };
 }
 
+/** Totais em centavos. */
 export interface TotaisIbsCbs { vBC: number; vIBSUF: number; vIBSMun: number; vIBS: number; vCBS: number }
 
-/** Grupo `<IBSCBSTot>` (W34–W56a). */
+/** Grupo `<IBSCBSTot>` (W34–W56a); valores em centavos. */
 export function totalIbsCbsXml(t: TotaisIbsCbs): string {
-  const z = fmt.money(0);
+  const X = centavosParaXml;
+  const z = X(0);
   return group('IBSCBSTot', [
-    tag('vBCIBSCBS', fmt.money(t.vBC)),
+    tag('vBCIBSCBS', X(t.vBC)),
     group('gIBS', [
-      group('gIBSUF', [tag('vDif', z), tag('vDevTrib', z), tag('vIBSUF', fmt.money(t.vIBSUF))]),
-      group('gIBSMun', [tag('vDif', z), tag('vDevTrib', z), tag('vIBSMun', fmt.money(t.vIBSMun))]),
-      tag('vIBS', fmt.money(t.vIBS)), tag('vCredPres', z), tag('vCredPresCondSus', z),
+      group('gIBSUF', [tag('vDif', z), tag('vDevTrib', z), tag('vIBSUF', X(t.vIBSUF))]),
+      group('gIBSMun', [tag('vDif', z), tag('vDevTrib', z), tag('vIBSMun', X(t.vIBSMun))]),
+      tag('vIBS', X(t.vIBS)), tag('vCredPres', z), tag('vCredPresCondSus', z),
     ]),
-    group('gCBS', [tag('vDif', z), tag('vDevTrib', z), tag('vCBS', fmt.money(t.vCBS)), tag('vCredPres', z), tag('vCredPresCondSus', z)]),
+    group('gCBS', [tag('vDif', z), tag('vDevTrib', z), tag('vCBS', X(t.vCBS)), tag('vCredPres', z), tag('vCredPresCondSus', z)]),
   ]);
 }
 

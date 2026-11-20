@@ -4,6 +4,7 @@ import type { NotaNfce } from '../types.js';
 import { TPAG } from '../types.js';
 import { ValidationError } from '../errors/index.js';
 import { fmt } from '../util/xml.js';
+import { centavosParaXml, reaisParaCentavos, valorDoItem } from '../util/dinheiro.js';
 
 export function cpfValido(v: string): boolean {
   const c = fmt.onlyDigits(v);
@@ -38,7 +39,6 @@ export function gtinValido(v: string): boolean {
   return (10 - (s % 10)) % 10 === dv;
 }
 
-const r2 = (v: number) => Math.round((v + Number.EPSILON) * 100) / 100;
 export const NFCE_LIMITE_ITENS = 990;
 
 /** Validações de negócio antes do envio. Lança ValidationError com todos os problemas. */
@@ -67,7 +67,7 @@ export function validarNota(n: NotaNfce, opcoes: { exigirIbsCbs?: boolean } = {}
     if (!(it.valorUnitario >= 0)) add(`${p}.valorUnitario`, 'inválido');
     if (it.gtin && !gtinValido(fmt.onlyDigits(it.gtin))) add(`${p}.gtin`, 'GTIN inválido (dígito verificador)');
     if (it.cest && !/^\d{7}$/.test(it.cest)) add(`${p}.cest`, 'CEST deve ter 7 dígitos');
-    if (r2(it.quantidade * it.valorUnitario) - (it.desconto ?? 0) < 0) add(`${p}.desconto`, 'desconto maior que o valor do item');
+    if (it.quantidade > 0 && it.valorUnitario >= 0 && valorDoItem(it.quantidade, it.valorUnitario) - reaisParaCentavos(it.desconto ?? 0) < 0) add(`${p}.desconto`, 'desconto maior que o valor do item');
     if (exigirIbsCbs && n.emitente.regimeTributario === 3 && (n.emissao ?? new Date()).getUTCFullYear() >= 2026 && !it.ibsCbs) {
       add(`${p}.ibsCbs`, 'obrigatório para Regime Normal (CRT 3) desde 2026 — LC 214/2025, NT 2025.002 (rejeição 1115). Informe cClassTrib ou configure ibsCbsPadrao no cliente');
     }
@@ -82,9 +82,14 @@ export function validarNota(n: NotaNfce, opcoes: { exigirIbsCbs?: boolean } = {}
   if (c?.cnpj && !cnpjValido(c.cnpj)) add('consumidor.cnpj', 'CNPJ inválido');
   if ((n.indicadorPresenca ?? 1) === 4 && !c?.endereco) add('consumidor.endereco', 'obrigatório na entrega em domicílio (indPres=4)');
 
-  const vNF = r2(n.itens.reduce((s, it) => s + r2(it.quantidade * it.valorUnitario) - (it.desconto ?? 0) + (it.frete ?? 0) + (it.seguro ?? 0) + (it.outrasDespesas ?? 0), 0));
-  const pago = r2(n.pagamentos.reduce((s, p) => s + p.valor, 0));
-  if (vNF > 0 && pago < vNF) add('pagamentos', `soma dos pagamentos (${pago}) menor que o total da nota (${vNF})`);
+  // Totais em centavos inteiros (mesmo cálculo de montarNfce).
+  const C = reaisParaCentavos;
+  const itensValidos = n.itens.every((it) => it.quantidade > 0 && it.valorUnitario >= 0);
+  const vNF = itensValidos
+    ? n.itens.reduce((s, it) => s + valorDoItem(it.quantidade, it.valorUnitario) - C(it.desconto ?? 0) + C(it.frete ?? 0) + C(it.seguro ?? 0) + C(it.outrasDespesas ?? 0), 0)
+    : 0;
+  const pago = n.pagamentos.reduce((s, p) => s + (Number.isFinite(p.valor) ? C(p.valor) : 0), 0);
+  if (vNF > 0 && pago < vNF) add('pagamentos', `soma dos pagamentos (${centavosParaXml(pago)}) menor que o total da nota (${centavosParaXml(vNF)})`);
   if (pago > vNF) {
     const temDinheiro = n.pagamentos.some((p) => (TPAG[p.tipo as keyof typeof TPAG] ?? p.tipo) === '01');
     if (!temDinheiro) add('pagamentos', 'troco só é permitido quando há pagamento em dinheiro');

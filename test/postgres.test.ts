@@ -66,23 +66,40 @@ describe('PostgresRegistro', () => {
     const r = new PostgresRegistro(db);
     await r.registrar(reg({ referencia: 'pedido-1' }));
     await expect(r.registrar(reg())).rejects.toBeInstanceOf(RegistroDuplicadoError);
-    await expect(r.registrar(reg({ chave: '3'.repeat(44), referencia: 'pedido-1' }))).rejects.toBeInstanceOf(RegistroDuplicadoError);
+    await expect(r.registrar(reg({ chave: '3'.repeat(44), numero: 3, referencia: 'pedido-1' }))).rejects.toBeInstanceOf(RegistroDuplicadoError);
     // sem referência não há restrição
-    await r.registrar(reg({ chave: '4'.repeat(44) }));
+    await r.registrar(reg({ chave: '4'.repeat(44), numero: 4 }));
     // referência pode ser liberada (reemissão) e reutilizada
     await r.atualizar(reg().chave, { referencia: null });
-    await r.registrar(reg({ chave: '5'.repeat(44), referencia: 'pedido-1' }));
+    await r.registrar(reg({ chave: '5'.repeat(44), numero: 5, referencia: 'pedido-1' }));
   });
 
   it('pendentes filtrados e ordenados', async () => {
     const r = new PostgresRegistro(db);
     await r.registrar(reg({ chave: '1'.repeat(44), criadaEm: '2026-11-20T10:00:00Z' }));
-    await r.registrar(reg({ chave: '2'.repeat(44), situacao: 'contingencia', tpEmis: 9, criadaEm: '2026-11-20T09:00:00Z' }));
-    await r.registrar(reg({ chave: '6'.repeat(44), situacao: 'autorizada' }));
-    await r.registrar(reg({ chave: '7'.repeat(44), uf: 'MG' }));
+    await r.registrar(reg({ chave: '2'.repeat(44), numero: 2, situacao: 'contingencia', tpEmis: 9, criadaEm: '2026-11-20T09:00:00Z' }));
+    await r.registrar(reg({ chave: '6'.repeat(44), numero: 6, situacao: 'autorizada' }));
+    await r.registrar(reg({ chave: '7'.repeat(44), numero: 7, uf: 'MG' }));
     const p = await r.pendentes({ uf: 'SP', ambiente: 'homologacao' });
     expect(p.map((x) => x.chave)).toEqual(['2'.repeat(44), '1'.repeat(44)]);
     expect(await r.pendentes({ ambiente: 'producao' })).toEqual([]);
+  });
+
+  it('número único: duas notas vivas no mesmo número são recusadas; rejeitada/descartada liberam', async () => {
+    const r = new PostgresRegistro(db);
+    await r.registrar(reg({ chave: 'A'.padEnd(44, '0'), numero: 10, situacao: 'autorizada' }));
+    await expect(r.registrar(reg({ chave: 'B'.padEnd(44, '0'), numero: 10, situacao: 'autorizada' }))).rejects.toBeInstanceOf(RegistroDuplicadoError);
+    await r.registrar(reg({ chave: 'C'.padEnd(44, '0'), numero: 11, situacao: 'rejeitada' }));
+    await r.registrar(reg({ chave: 'D'.padEnd(44, '0'), numero: 11, situacao: 'pendente' })); // reemissão no número da rejeitada
+    await expect(r.atualizar('C'.padEnd(44, '0'), { situacao: 'autorizada' })).rejects.toBeInstanceOf(RegistroDuplicadoError);
+    expect((await r.buscarPorNumero('11222333000181', 'homologacao', 1, 11)).map((n) => n.situacao).sort()).toEqual(['pendente', 'rejeitada']);
+  });
+
+  it('cancelamento grava protocolo e data', async () => {
+    const r = new PostgresRegistro(db);
+    await r.registrar(reg({ situacao: 'autorizada' }));
+    await r.atualizar(reg().chave, { situacao: 'cancelada', protocoloCancelamento: '135260000000099', canceladaEm: '2026-11-20T13:10:00.000Z' });
+    expect(await r.buscar(reg().chave)).toMatchObject({ situacao: 'cancelada', protocoloCancelamento: '135260000000099', canceladaEm: '2026-11-20T13:10:00.000Z' });
   });
 
   it('buracos de numeração', async () => {
@@ -93,5 +110,21 @@ describe('PostgresRegistro', () => {
     const ok = (n: number, situacao: RegistroNota['situacao'] = 'autorizada') => r.registrar(reg({ chave: String(n).padStart(44, '0'), numero: n, situacao }));
     await ok(1); await ok(2); await ok(4, 'rejeitada'); await ok(5, 'pendente');
     expect(await r.buracos({ cnpj: k.cnpj, ambiente: 'homologacao', serie: 1 })).toEqual([3, 4, 6]);
+    // descartada não ocupa o número; inutilizados deixam de ser buraco
+    await r.registrar(reg({ chave: '9'.repeat(44), numero: 3, situacao: 'descartada' }));
+    await r.registrarInutilizacao({ cnpj: k.cnpj, ambiente: 'homologacao', serie: 1, inicio: 6, fim: 6, protocolo: '1' });
+    expect(await r.buracos({ cnpj: k.cnpj, ambiente: 'homologacao', serie: 1 })).toEqual([3, 4]);
+  });
+
+  it('definirInicio não volta a numeração (salvo forcar)', async () => {
+    const num = new PostgresNumerador(db);
+    const k = { cnpj: '11222333000181', ambiente: 'homologacao' as const, modelo: 65 as const, serie: 1 };
+    for (let i = 0; i < 10; i++) await num.proximo(k);
+    await expect(num.definirInicio(k, 1)).rejects.toThrow(/já entregou até o número 10/);
+    await expect(num.definirInicio(k, 10)).rejects.toThrow();
+    await num.definirInicio(k, 11); // continuar exatamente de onde parou é permitido
+    expect(await num.proximo(k)).toBe(11);
+    await num.definirInicio(k, 1, { forcar: true });
+    expect(await num.proximo(k)).toBe(1);
   });
 });

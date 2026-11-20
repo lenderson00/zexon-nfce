@@ -4,6 +4,11 @@
 export class NfceError extends Error {
   /** true se a mesma operação pode ser repetida mais tarde (falha temporária). */
   readonly retentavel: boolean = false;
+  /**
+   * true quando é **certo** que a SEFAZ não recebeu a requisição (conexão recusada, DNS, handshake TLS,
+   * ou serviço paralisado 108/109). false = incerto: a nota pode ter sido processada.
+   */
+  readonly naoRecebido: boolean = false;
   /** Chave de acesso envolvida, quando já existe (use em `retomar(chave)`). */
   chave?: string;
   constructor(message: string, public readonly code = 'NFCE_ERROR') {
@@ -19,11 +24,14 @@ export class ValidationError extends NfceError {
   }
 }
 
-/** Falha de comunicação (timeout, DNS, TLS, HTTP != 200). Temporária: pode ser repetida. */
+/** Falha de comunicação (timeout, DNS, TLS, HTTP). Em geral temporária; ver `retentavel` e `naoRecebido`. */
 export class TransportError extends NfceError {
-  override readonly retentavel = true;
-  constructor(message: string, public readonly causa?: unknown) {
+  override readonly retentavel: boolean;
+  override readonly naoRecebido: boolean;
+  constructor(message: string, public readonly causa?: unknown, opcoes: { naoRecebido?: boolean; retentavel?: boolean } = {}) {
     super(message, 'TRANSPORT');
+    this.retentavel = opcoes.retentavel ?? true;
+    this.naoRecebido = opcoes.naoRecebido ?? false;
   }
 }
 
@@ -33,6 +41,7 @@ export const CSTAT_INDISPONIVEL = ['108', '109', '999'];
 /** SEFAZ respondeu com erro. Retentável quando indica indisponibilidade (108, 109, 999). */
 export class SefazError extends NfceError {
   override readonly retentavel: boolean;
+  override readonly naoRecebido: boolean;
   constructor(
     message: string,
     public readonly cStat: string,
@@ -41,6 +50,8 @@ export class SefazError extends NfceError {
   ) {
     super(message, 'SEFAZ');
     this.retentavel = CSTAT_INDISPONIVEL.includes(cStat);
+    // 108/109: serviço paralisado — o lote não foi processado. 999 (erro não catalogado) fica como incerto.
+    this.naoRecebido = cStat === '108' || cStat === '109';
   }
 }
 

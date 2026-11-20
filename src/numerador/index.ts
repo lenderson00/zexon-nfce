@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 Lenderson Macedo — licença comercial disponível (ver COPYRIGHT.md).
 import type { Ambiente } from '../types.js';
+import { NfceError } from '../errors/index.js';
 
 /** Identifica uma sequência de numeração: cada combinação tem números independentes. */
 export interface ChaveSequencia {
@@ -32,8 +33,12 @@ export class MemoryNumerador implements Numerador {
     return n;
   }
 
-  /** Define o primeiro número a ser entregue (ex.: migração de outro emissor). */
-  definirInicio(k: ChaveSequencia, primeiro: number): void {
+  /** Define o primeiro número a ser entregue. Recusa voltar a numeração, salvo `{ forcar: true }`. */
+  definirInicio(k: ChaveSequencia, primeiro: number, opcoes: { forcar?: boolean } = {}): void {
+    const atual = this.ultimos.get(idSequencia(k));
+    if (!opcoes.forcar && atual !== undefined && primeiro <= atual) {
+      throw new NfceError(`A sequência já entregou até o número ${atual}; use { forcar: true } se tiver certeza.`, 'NUMERACAO');
+    }
     this.ultimos.set(idSequencia(k), primeiro - 1);
   }
 }

@@ -13,11 +13,12 @@ const soap = (inner: string) => `<?xml version="1.0"?><soap:Envelope xmlns:soap=
 const pick = (s: string, t: string) => new RegExp(`<${t}>([^<]*)</${t}>`).exec(s)?.[1] ?? '';
 
 /** SEFAZ simulada: responde conforme o serviço (pela URL) e o conteúdo enviado. */
-function sefazFake(opts: { down?: boolean; authorize?: boolean; cStatProt?: string } = {}) {
+function sefazFake(opts: { down?: boolean; recusada?: boolean; authorize?: boolean; cStatProt?: string } = {}) {
   const calls: Array<{ url: string; body: string }> = [];
   const autorizadas = new Set<string>();
   const fetchImpl = async (url: string, envelope: string) => {
     calls.push({ url, body: envelope });
+    if (opts.recusada) throw new TransportError('connect ECONNREFUSED', undefined, { naoRecebido: true });
     if (opts.down) throw new TransportError('sem conexão');
     if (url.includes('Autorizacao4')) {
       const chave = /Id="NFe(\d{44})"/.exec(envelope)![1]!;
@@ -101,8 +102,10 @@ describe('NfceClient', () => {
   });
 
   it('contingência automática e retransmissão', async () => {
-    const down = novoCliente(sefazFake({ down: true }), { contingenciaAutomatica: true });
+    // Conexão recusada = certo que a SEFAZ não recebeu: contingência automática com o mesmo número.
+    const down = novoCliente(sefazFake({ recusada: true }), { contingenciaAutomatica: true });
     const r = await down.emitir(notaExemplo());
+    expect(r.numero).toBe(1);
     expect(r.status).toBe('contingencia');
     expect(r.xmlAssinado).toContain('<tpEmis>9</tpEmis>');
     expect(r.qrCode).toMatch(/\|2\|2\|\d{2}\|25\.00\|[0-9a-f]+\|1\|[0-9A-F]{40}$/);

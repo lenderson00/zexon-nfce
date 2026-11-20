@@ -65,7 +65,7 @@ describe('S3Storage', () => {
     const pfx = gerarPfxTeste();
     const off = new NfceClient({
       uf: 'SP', ambiente: 'homologacao', certificado: pfx, storage, contingenciaAutomatica: true, retentativas: { esperasMs: [0] },
-      transporte: { fetchImpl: async () => { throw new TransportError('offline'); } },
+      transporte: { fetchImpl: async () => { throw new TransportError('connect ECONNREFUSED', undefined, { naoRecebido: true }); } },
     });
     const r = await off.emitir(notaExemplo());
     expect(r.status).toBe('contingencia');

@@ -3,6 +3,7 @@
 import type { ChaveSequencia, Numerador } from '../numerador/index.js';
 import type { Ambiente } from '../types.js';
 import { ambienteNum, tabela, type ExecutorSql, type OpcoesPostgres } from './sql.js';
+import { NfceError } from '../errors/index.js';
 
 /** Numerador atômico em Postgres (tabela `nfce_sequencia`). */
 export class PostgresNumerador implements Numerador {
@@ -23,13 +24,24 @@ export class PostgresNumerador implements Numerador {
     return Number(r.rows[0].ultimo);
   }
 
-  /** Define o primeiro número a ser entregue (ex.: migração de outro emissor). */
-  async definirInicio(k: ChaveSequencia, primeiro: number): Promise<void> {
-    await this.db.query(
+  /**
+   * Define o primeiro número a ser entregue (ex.: migração de outro emissor).
+   * Recusa voltar a numeração (primeiro ≤ último já entregue), o que reentregaria números usados.
+   * `forcar: true` ignora essa proteção — só use se tiver certeza de que os números não foram usados.
+   */
+  async definirInicio(k: ChaveSequencia, primeiro: number, opcoes: { forcar?: boolean } = {}): Promise<void> {
+    if (!Number.isInteger(primeiro) || primeiro < 1) throw new NfceError('O primeiro número deve ser um inteiro ≥ 1.', 'NUMERACAO');
+    const r = await this.db.query(
       `INSERT INTO ${this.t} (cnpj, ambiente, modelo, serie, inicio, ultimo) VALUES ($1, $2, $3, $4, $5::bigint, $5::bigint - 1)
-       ON CONFLICT (cnpj, ambiente, modelo, serie) DO UPDATE SET inicio = $5::bigint, ultimo = $5::bigint - 1, atualizada_em = now()`,
-      [k.cnpj, ambienteNum(k.ambiente), k.modelo, k.serie, primeiro],
+       ON CONFLICT (cnpj, ambiente, modelo, serie) DO UPDATE SET inicio = EXCLUDED.inicio, ultimo = EXCLUDED.ultimo, atualizada_em = now()
+       WHERE $6::boolean OR ${this.t}.ultimo < EXCLUDED.inicio
+       RETURNING ultimo`,
+      [k.cnpj, ambienteNum(k.ambiente), k.modelo, k.serie, primeiro, !!opcoes.forcar],
     );
+    if (r.rows.length === 0) {
+      const ult = await this.ultimo(k);
+      throw new NfceError(`A sequência já entregou até o número ${ult}; definirInicio(${primeiro}) reentregaria números usados. Use { forcar: true } se tiver certeza.`, 'NUMERACAO');
+    }
   }
 
   /** Último número entregue (undefined se a sequência ainda não existe). */

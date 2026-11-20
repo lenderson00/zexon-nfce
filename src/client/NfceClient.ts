@@ -16,7 +16,7 @@ import {
 import { validarNota } from '../validation/index.js';
 import { NfceError, SefazError, ValidationError, CertificateError, CSTAT_INDISPONIVEL } from '../errors/index.js';
 import type { Storage } from '../storage/index.js';
-import { RegistroDuplicadoError, type RegistroNota, type RegistroNotas } from '../registro/index.js';
+import { RegistroDuplicadoError, SITUACOES_A_RESOLVER, SITUACOES_SEM_NUMERO, type RegistroNota, type RegistroNotas } from '../registro/index.js';
 import type { Numerador } from '../numerador/index.js';
 import { gerarDanfceHtml, gerarDanfcePdf, type DanfceOpcoes } from '../danfce/index.js';
 
@@ -59,6 +59,13 @@ export interface NfceClientConfig {
   numerador?: Numerador;
   /** Retentativa curta para falhas temporárias (rede, SEFAZ 108/109). Padrão: 3 tentativas, esperas de 0,5 s e 1,5 s. */
   retentativas?: { tentativas?: number; esperasMs?: number[] };
+  /**
+   * Prazo para transmitir notas de contingência offline. A regra nacional é o fim do primeiro dia útil seguinte
+   * à emissão; algumas UFs (ex.: PA) usam 24 h. Padrão: `{ horas: 24, alertaHoras: 18 }` (conservador).
+   */
+  prazoContingencia?: { horas?: number; alertaHoras?: number };
+  /** Relógio (testes). Padrão: `() => new Date()`. */
+  relogio?: () => Date;
 }
 
 export interface OpcoesEmissao {
@@ -71,9 +78,17 @@ export interface OpcoesEmissao {
 
 /**
  * - pendente: gravada, ainda sem resposta definitiva (falha temporária); será concluída por `retomar`/`processarPendentes`
- * - conflito: contingência cuja nota original acabou autorizada — requer ação manual (ex.: cancelar uma delas)
+ * - contingencia: emitida offline (tpEmis=9), aguardando transmissão
+ * - descartada: nota online que a SEFAZ nunca recebeu; o número foi liberado
+ * - conflito: nota online substituída por contingência que acabou autorizada — a venda tem duas notas: cancele esta
  */
-export type StatusEmissao = 'autorizada' | 'rejeitada' | 'denegada' | 'contingencia' | 'pendente' | 'cancelada' | 'conflito';
+export type StatusEmissao = 'autorizada' | 'rejeitada' | 'denegada' | 'contingencia' | 'pendente' | 'cancelada' | 'descartada' | 'conflito';
+
+export interface PrazoContingencia {
+  horasDesdeEmissao: number;
+  /** ok; alerta (passou de `alertaHoras`); vencido (passou de `horas`). */
+  situacao: 'ok' | 'alerta' | 'vencido';
+}
 
 export interface ResultadoEmissao {
   status: StatusEmissao;
@@ -95,6 +110,8 @@ export interface ResultadoEmissao {
   motivoContingencia?: string;
   /** Tentativas de envio feitas nesta chamada. */
   tentativas?: number;
+  /** Notas de contingência em `processarPendentes`: tempo desde a emissão em relação ao prazo de transmissão. */
+  prazo?: PrazoContingencia;
 }
 
 type BaseResultado = Pick<ResultadoEmissao, 'chave' | 'numero' | 'serie' | 'qrCode' | 'urlChave' | 'totais' | 'xmlAssinado'>;
@@ -104,14 +121,23 @@ function baseDeXml(chave: string, xml: string): BaseResultado {
   const p = parseChave(chave);
   return {
     chave, numero: p.nNF, serie: p.serie, xmlAssinado: xml,
-    qrCode: /<qrCode><!\[CDATA\[([^\]]*)\]\]><\/qrCode>/.exec(xml)?.[1] ?? '',
+    qrCode: lerQrCode(xml),
     urlChave: /<urlChave>([^<]*)<\/urlChave>/.exec(xml)?.[1] ?? '',
     totais: { valorNota: Number(/<vNF>([\d.]+)<\/vNF>/.exec(xml)?.[1] ?? 0) },
   };
 }
 
+/** Conteúdo de <qrCode>, com ou sem CDATA (a NT 2025.001 dispensou o CDATA). */
+export function lerQrCode(xml: string): string {
+  const m = /<qrCode>\s*(?:<!\[CDATA\[([\s\S]*?)\]\]>|([^<]*))\s*<\/qrCode>/.exec(xml);
+  return (m?.[1] ?? m?.[2] ?? '').trim().replace(/&amp;/g, '&');
+}
+
 const espera = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const agoraIso = () => new Date().toISOString();
+/** B09-40: NFC-e normal só é aceita até 5 min após o dhEmi; margem extra antes de declarar uma chave descartada. */
+const JANELA_ENVIO_MIN = 5;
+const MARGEM_DESCARTE_MIN = 5;
 
 export interface ResultadoConsulta {
   chave: string;
@@ -170,6 +196,8 @@ export class NfceClient {
   }
 
   get ambiente(): Ambiente { return this.config.ambiente; }
+  /** Hora atual segundo o relógio configurado. */
+  agora(): Date { return this.config.relogio?.() ?? new Date(); }
   get fuso(): number { return this.config.fusoMinutos ?? fusoDaUF(this.config.uf); }
   private get tpAmb(): 1 | 2 { return this.config.ambiente === 'producao' ? 1 : 2; }
   private get qrVersao(): VersaoQrCode { return this.config.qrCodeVersao ?? (this.config.csc ? 2 : 3); }
@@ -195,11 +223,16 @@ export class NfceClient {
     const nota: NotaNfce = padrao ? { ...notaOriginal, itens: notaOriginal.itens.map((it) => (it.ibsCbs ? it : { ...it, ibsCbs: padrao })) } : notaOriginal;
     validarNota(nota);
     if (nota.emitente.endereco.uf.toUpperCase() !== this.config.uf) throw new ValidationError(`UF do emitente (${nota.emitente.endereco.uf}) diferente da UF do cliente (${this.config.uf})`, ['emitente.endereco.uf']);
+    this.conferirCertificado(nota.emitente.cnpj);
     const offline = !!opcoes.offline;
-    const n: NotaNfce = { ...nota, responsavelTecnico: nota.responsavelTecnico ?? this.config.responsavelTecnico, versaoSoftware: nota.versaoSoftware ?? this.config.versaoSoftware };
+    const agora = this.agora();
+    const n: NotaNfce = {
+      ...nota, emissao: nota.emissao ?? agora,
+      responsavelTecnico: nota.responsavelTecnico ?? this.config.responsavelTecnico, versaoSoftware: nota.versaoSoftware ?? this.config.versaoSoftware,
+    };
     const m = montarNfce(n, {
       ambiente: this.ambiente, tpEmis: offline ? 9 : 1, offsetMinutes: this.fuso, cNF: opcoes.cNF,
-      dhCont: new Date(), xJust: opcoes.motivoContingencia,
+      dhCont: agora, xJust: opcoes.motivoContingencia,
     });
     const assinado = assinarXml(m.xml, 'infNFe', 'NFe', this.cert);
     const urlBase = this.endpoints.qrCode;
@@ -216,6 +249,19 @@ export class NfceClient {
     const supl = `<infNFeSupl><qrCode><![CDATA[${qrCode}]]></qrCode>${urlChave ? `<urlChave>${urlChave}</urlChave>` : ''}</infNFeSupl>`;
     const xmlAssinado = assinado.replace('<Signature', `${supl}<Signature`);
     return { chave: m.chave, xmlAssinado, qrCode, urlChave, totais: m.totais, dhEmi: m.dhEmi, nota: n };
+  }
+
+  /**
+   * Confere se o certificado pertence à empresa emitente. A SEFAZ compara a **raiz do CNPJ** (8 dígitos;
+   * rejeição 213), o que permite ao certificado da matriz assinar notas das filiais. Certificados sem CNPJ
+   * no CN (ou e-CPF) não são conferidos: a responsabilidade fica com quem chama.
+   */
+  conferirCertificado(cnpjEmitente: string): void {
+    const doc = this.cert.documento;
+    const cnpj = fmt.onlyDigits(cnpjEmitente);
+    if (doc && doc.length === 14 && cnpj.length === 14 && doc.slice(0, 8) !== cnpj.slice(0, 8)) {
+      throw new CertificateError(`O certificado digital é do CNPJ ${doc}, que não pertence à empresa emitente ${cnpj} (raiz do CNPJ diferente).`);
+    }
   }
 
   /** Aplica padrões do cliente, valida e obtém o número (do `numerador` se a nota não trouxer). */
@@ -273,30 +319,39 @@ export class NfceClient {
     });
   }
 
-  /** Envia com retentativa; em falha temporária persistente, confirma pela consulta e decide (pendente/contingência). */
+  /**
+   * Envia com retentativa. Se a falha persistir:
+   * - confirma pela consulta (a SEFAZ pode ter autorizado sem a resposta chegar);
+   * - se for **certo** que a SEFAZ nunca recebeu a nota (todas as falhas antes da conexão, ou 108/109) e
+   *   `contingenciaAutomatica` estiver ligada: emite offline com o **mesmo número** e descarta a chave online;
+   * - se houver qualquer dúvida: a nota fica `pendente` (nunca cria uma segunda nota automaticamente) e o erro
+   *   sai com `retentavel` e `chave`. Para dar um cupom ao consumidor nesse caso, use `contingencia.substituirPendente`.
+   */
   private async transmitir(base: BaseResultado, ctx: { nota?: NotaNfce & { numero: number }; referencia?: string; tentativasAnteriores?: number } = {}): Promise<ResultadoEmissao> {
     const reg = this.config.registro;
     let tentativas = 0;
+    let incerto = false;
     try {
-      const r = await this.enviarComRetentativa(base, () => { tentativas++; });
+      const r = await this.enviarComRetentativa(base, () => { tentativas++; }, (e) => { if (!e.naoRecebido) incerto = true; });
       return await this.finalizar(r, (ctx.tentativasAnteriores ?? 0) + tentativas);
     } catch (e) {
       if (!(e instanceof NfceError && e.retentavel)) {
         if (e instanceof NfceError) e.chave = base.chave;
         throw e;
       }
-      // A SEFAZ pode ter autorizado antes da queda: confirmar antes de decidir.
-      try {
-        const c = await this.consultar(base.chave);
-        if (c.situacao === 'autorizada' && c.xmlProtocolo) {
-          const r = await this.resultadoAutorizado(base, c.cStat, c.xMotivo, c.xmlProtocolo, base.xmlAssinado);
-          return await this.finalizar(r, (ctx.tentativasAnteriores ?? 0) + tentativas);
-        }
-      } catch { /* sem conectividade */ }
+      if (incerto) {
+        try {
+          const c = await this.consultar(base.chave);
+          if (c.situacao === 'autorizada' && c.xmlProtocolo) {
+            const r = await this.resultadoAutorizado(base, c.cStat, c.xMotivo, c.xmlProtocolo, base.xmlAssinado);
+            return await this.finalizar(r, (ctx.tentativasAnteriores ?? 0) + tentativas);
+          }
+        } catch { /* sem conectividade */ }
+      }
       await reg?.atualizar(base.chave, { tentativas: (ctx.tentativasAnteriores ?? 0) + tentativas, ultimoErro: (e as Error).message.slice(0, 500) }).catch(() => {});
-      if (ctx.nota && this.config.contingenciaAutomatica && this.config.storage) {
-        return this.contingencia.emitirOffline(ctx.nota, `Falha de comunicacao com a SEFAZ: ${(e as Error).message}`.slice(0, 250), {
-          referencia: ctx.referencia, chaveOriginal: base.chave,
+      if (!incerto && ctx.nota && this.config.contingenciaAutomatica && this.config.storage) {
+        return this.contingencia.emitirOfflineInterno(ctx.nota, `Falha de comunicacao com a SEFAZ: ${(e as Error).message}`.slice(0, 250), {
+          referencia: ctx.referencia, original: { chave: base.chave, modo: 'descartada' },
         });
       }
       e.chave = base.chave;
@@ -304,7 +359,7 @@ export class NfceClient {
     }
   }
 
-  private async enviarComRetentativa(base: BaseResultado, aoTentar: () => void): Promise<ResultadoEmissao> {
+  private async enviarComRetentativa(base: BaseResultado, aoTentar: () => void, aoFalhar: (e: NfceError) => void): Promise<ResultadoEmissao> {
     const max = Math.max(1, this.config.retentativas?.tentativas ?? 3);
     const esperas = this.config.retentativas?.esperasMs ?? [500, 1500, 4000];
     for (let i = 1; ; i++) {
@@ -312,6 +367,7 @@ export class NfceClient {
       try {
         return { ...(await this.enviarAssinada(base.xmlAssinado, base)), tentativas: i };
       } catch (e) {
+        if (e instanceof NfceError) aoFalhar(e);
         if (!(e instanceof NfceError && e.retentavel) || i >= max) throw e;
         await espera(esperas[Math.min(i - 1, esperas.length - 1)] ?? 0);
       }
@@ -331,14 +387,21 @@ export class NfceClient {
     return r;
   }
 
-  /** Monta o resultado de uma nota já registrada (idempotência por referência). */
-  private async resultadoDoRegistro(n: RegistroNota): Promise<ResultadoEmissao> {
-    if (n.situacao === 'pendente' || n.situacao === 'contingencia') return this.retomar(n.chave);
+  /**
+   * @internal Monta o resultado de uma nota já registrada (idempotência por referência).
+   * Notas a resolver são concluídas com `retomar`, salvo `semRede` (devolve o que está gravado, sem acessar a SEFAZ).
+   */
+  async resultadoDoRegistro(n: RegistroNota, opcoes: { semRede?: boolean } = {}): Promise<ResultadoEmissao> {
     const st = this.config.storage;
-    const tipo = n.situacao === 'autorizada' || n.situacao === 'cancelada' ? 'autorizadas' : n.situacao === 'substituida' ? 'substituidas' : n.situacao === 'conflito' ? 'contingencia' : 'rejeitadas';
+    if (SITUACOES_A_RESOLVER.includes(n.situacao)) {
+      if (!opcoes.semRede) return this.retomar(n.chave);
+      const xml = (await st?.ler(n.situacao === 'contingencia' ? 'contingencia' : 'pendentes', n.chave)) ?? '';
+      return { ...baseDeXml(n.chave, xml), status: n.situacao === 'contingencia' ? 'contingencia' : 'pendente', cStat: n.cStat ?? '', xMotivo: n.xMotivo ?? '' };
+    }
+    const tipo = ['autorizada', 'cancelada', 'conflito'].includes(n.situacao) ? 'autorizadas' : n.situacao === 'descartada' ? 'substituidas' : 'rejeitadas';
     const xml = (await st?.ler(tipo, n.chave)) ?? '';
     const assinado = /<NFe[\s\S]*<\/NFe>/.exec(xml)?.[0] ?? xml;
-    const status: StatusEmissao = n.situacao === 'substituida' ? 'conflito' : n.situacao;
+    const status = n.situacao as StatusEmissao;
     return {
       ...baseDeXml(n.chave, assinado), status, cStat: n.cStat ?? '', xMotivo: n.xMotivo ?? '', protocolo: n.protocolo ?? undefined,
       dataAutorizacao: n.autorizadaEm ?? undefined, xmlAutorizado: tipo === 'autorizadas' && xml ? xml : undefined,
@@ -354,7 +417,8 @@ export class NfceClient {
     if (!st) throw new NfceError('`retomar` requer `storage` configurado.', 'STORAGE_AUSENTE');
     const reg = this.config.registro;
     const r0 = await reg?.buscar(chave);
-    if (r0 && r0.situacao !== 'pendente' && r0.situacao !== 'contingencia') return this.resultadoDoRegistro(r0);
+    if (r0 && !SITUACOES_A_RESOLVER.includes(r0.situacao)) return this.resultadoDoRegistro(r0);
+    if (r0?.situacao === 'substituida') return this.resolverSubstituida(r0);
 
     const xml = (await st.ler('pendentes', chave)) ?? (await st.ler('contingencia', chave));
     if (!xml) {
@@ -365,18 +429,6 @@ export class NfceClient {
     const base = baseDeXml(chave, xml);
     const tentativasAnteriores = r0?.tentativas ?? 0;
     try {
-      // Contingência: se a nota online original acabou autorizada, não transmitir esta (evita nota em dobro).
-      if (r0?.chaveOriginal) {
-        const o = await this.consultar(r0.chaveOriginal);
-        if (o.situacao === 'autorizada' && o.xmlProtocolo) {
-          const orig = await st.ler('substituidas', r0.chaveOriginal);
-          if (orig) await st.salvar('autorizadas', r0.chaveOriginal, S.montarNfeProc(orig, o.xmlProtocolo));
-          const motivo = `A nota original ${r0.chaveOriginal} foi autorizada; esta contingência não foi transmitida. Trate manualmente (ex.: cancelar a original e transmitir esta).`;
-          await reg!.atualizar(r0.chaveOriginal, { situacao: 'autorizada', protocolo: o.protocolo ?? null, cStat: o.cStat, xMotivo: o.xMotivo });
-          await reg!.atualizar(chave, { situacao: 'conflito', xMotivo: motivo });
-          return { ...base, status: 'conflito', cStat: '', xMotivo: motivo };
-        }
-      }
       const c = await this.consultar(chave);
       if (c.situacao === 'autorizada' && c.xmlProtocolo) {
         return await this.finalizar(await this.resultadoAutorizado(base, c.cStat, c.xMotivo, c.xmlProtocolo, xml), tentativasAnteriores);
@@ -387,6 +439,52 @@ export class NfceClient {
       throw e;
     }
     return this.transmitir(base, { tentativasAnteriores });
+  }
+
+  /**
+   * Nota online trocada por contingência com outro número: **nunca** é reenviada; só consultada.
+   * - autorizada → `conflito` (a venda tem duas notas; cancele esta dentro do prazo da UF);
+   * - inexistente (217) e já fora da janela de 5 min (B09-40) → `descartada` (número livre: inutilize — ver `buracos`);
+   * - senão continua aguardando.
+   */
+  private async resolverSubstituida(r0: RegistroNota): Promise<ResultadoEmissao> {
+    const st = this.config.storage!;
+    const reg = this.config.registro!;
+    const xml = (await st.ler('substituidas', r0.chave)) ?? '';
+    const base = xml ? baseDeXml(r0.chave, xml) : { ...baseDeXml(r0.chave, ''), totais: { valorNota: r0.valor } };
+    let c: ResultadoConsulta;
+    try {
+      c = await this.consultar(r0.chave);
+    } catch (e) {
+      if (e instanceof NfceError) e.chave = r0.chave;
+      throw e;
+    }
+    if (c.situacao === 'autorizada' && c.xmlProtocolo) {
+      const xmlAutorizado = xml ? S.montarNfeProc(xml, c.xmlProtocolo) : undefined;
+      if (xmlAutorizado) await st.salvar('autorizadas', r0.chave, xmlAutorizado);
+      const motivo = 'Autorizada depois de ter sido substituida por contingencia: a venda ficou com duas notas. Cancele esta nota (dentro do prazo da UF).';
+      await reg.atualizar(r0.chave, { situacao: 'conflito', protocolo: c.protocolo ?? null, cStat: c.cStat, xMotivo: motivo });
+      return { ...base, status: 'conflito', cStat: c.cStat, xMotivo: motivo, protocolo: c.protocolo, xmlAutorizado };
+    }
+    if (c.situacao === 'cancelada' || c.situacao === 'denegada') {
+      await reg.atualizar(r0.chave, { situacao: c.situacao, cStat: c.cStat, xMotivo: c.xMotivo });
+      return { ...base, status: c.situacao, cStat: c.cStat, xMotivo: c.xMotivo };
+    }
+    const idadeMin = (this.agora().getTime() - Date.parse(r0.emitidaEm)) / 60000;
+    if (c.situacao === 'inexistente' && idadeMin > JANELA_ENVIO_MIN + MARGEM_DESCARTE_MIN) {
+      const motivo = 'Nunca recebida pela SEFAZ e fora da janela de envio (B09-40): numero livre, inutilize-o (ver buracos).';
+      await reg.atualizar(r0.chave, { situacao: 'descartada', cStat: c.cStat, xMotivo: motivo });
+      return { ...base, status: 'descartada', cStat: c.cStat, xMotivo: motivo };
+    }
+    return { ...base, status: 'pendente', cStat: c.cStat, xMotivo: 'Nota substituida por contingencia, aguardando confirmacao de que a SEFAZ nao a recebeu.' };
+  }
+
+  /** Tempo desde a emissão de uma nota de contingência, comparado ao prazo de transmissão. */
+  prazoContingencia(dhEmi: string): PrazoContingencia {
+    const horas = this.config.prazoContingencia?.horas ?? 24;
+    const alerta = this.config.prazoContingencia?.alertaHoras ?? 18;
+    const h = (this.agora().getTime() - Date.parse(dhEmi)) / 3600000;
+    return { horasDesdeEmissao: Math.round(h * 10) / 10, situacao: h > horas ? 'vencido' : h > alerta ? 'alerta' : 'ok' };
   }
 
   /**
@@ -413,13 +511,21 @@ export class NfceClient {
     }
     const out: ResultadoEmissao[] = [];
     for (const chave of chaves) {
+      const xml = (await st.ler('contingencia', chave)) ?? (await st.ler('pendentes', chave)) ?? '';
+      const contingencia = parseChave(chave).tpEmis === 9;
+      // Prazo da contingência: avisa (alerta/vencido) mas ainda tenta transmitir.
+      const dhEmi = /<dhEmi>([^<]+)<\/dhEmi>/.exec(xml)?.[1];
+      const prazo = contingencia && dhEmi ? this.prazoContingencia(dhEmi) : undefined;
+      let r: ResultadoEmissao;
       try {
-        out.push(await this.retomar(chave));
+        r = await this.retomar(chave);
       } catch (e) {
-        const xml = (await st.ler('contingencia', chave)) ?? (await st.ler('pendentes', chave)) ?? '';
-        const contingencia = parseChave(chave).tpEmis === 9;
-        out.push({ ...baseDeXml(chave, xml), status: contingencia ? 'contingencia' : 'pendente', cStat: (e as SefazError).cStat ?? '', xMotivo: (e as Error).message });
+        r = { ...baseDeXml(chave, xml), status: contingencia ? 'contingencia' : 'pendente', cStat: (e as SefazError).cStat ?? '', xMotivo: (e as Error).message };
       }
+      if (prazo && prazo.situacao !== 'ok' && r.status === 'contingencia') {
+        r.xMotivo = `${r.xMotivo} [PRAZO ${prazo.situacao.toUpperCase()}: ${prazo.horasDesdeEmissao} h desde a emissao]`;
+      }
+      out.push(prazo ? { ...r, prazo } : r);
     }
     return out;
   }
@@ -431,12 +537,19 @@ export class NfceClient {
   async reemitir(chave: string, notaCorrigida: NotaNfce, opcoes: OpcoesEmissao = {}): Promise<ResultadoEmissao> {
     const reg = this.config.registro;
     const r0 = await reg?.buscar(chave);
-    if (r0 && r0.situacao !== 'rejeitada') throw new ValidationError(`Só notas rejeitadas podem ser reemitidas com o mesmo número (situação atual: ${r0.situacao}).`, ['chave']);
+    if (r0 && !SITUACOES_SEM_NUMERO.includes(r0.situacao)) {
+      throw new ValidationError(`Só notas rejeitadas (ou descartadas) podem ser reemitidas com o mesmo número (situação atual: ${r0.situacao}).`, ['chave']);
+    }
+    const pc = parseChave(chave);
+    if (reg) {
+      // O número pode já ter sido reaproveitado (reemissão anterior, contingência): nunca duas notas vivas no mesmo número.
+      const vivas = (await reg.buscarPorNumero(pc.cnpj, this.ambiente, pc.serie, pc.nNF)).filter((n) => n.chave !== chave && !SITUACOES_SEM_NUMERO.includes(n.situacao));
+      if (vivas.length) throw new ValidationError(`O número ${pc.nNF} (série ${pc.serie}) já está ocupado pela nota ${vivas[0]!.chave} (${vivas[0]!.situacao}).`, ['chave']);
+    }
     if (!r0) {
       const c = await this.consultar(chave);
       if (c.situacao !== 'inexistente') throw new ValidationError(`A nota ${chave} existe na SEFAZ (${c.situacao}); não pode ser reemitida.`, ['chave']);
     }
-    const pc = parseChave(chave);
     if (fmt.onlyDigits(notaCorrigida.emitente.cnpj) !== pc.cnpj) throw new ValidationError('O CNPJ do emitente difere do da nota original.', ['emitente.cnpj']);
     const referencia = opcoes.referencia ?? r0?.referencia ?? undefined;
     if (r0?.referencia) await reg!.atualizar(chave, { referencia: null });
@@ -521,8 +634,17 @@ export class NfceClient {
   /** Cancela uma NFC-e autorizada (evento 110111). `protocolo` = número do protocolo de autorização. */
   async cancelar(p: { chave: string; protocolo: string; justificativa: string }): Promise<ResultadoEvento> {
     const r = await this.enviarEvento(p.chave, TIPO_CANCELAMENTO, detalheCancelamento(p.protocolo, p.justificativa));
-    if (r.xmlProcEvento) await this.config.storage?.salvar('cancelamentos', p.chave, r.xmlProcEvento);
+    await this.registrarCancelamento(p.chave, r);
     return r;
+  }
+
+  /** Guarda o XML do evento e marca a nota como cancelada no registro (só em caso de sucesso). */
+  private async registrarCancelamento(chave: string, r: ResultadoEvento): Promise<void> {
+    if (!r.sucesso) return;
+    if (r.xmlProcEvento) await this.config.storage?.salvar('cancelamentos', chave, r.xmlProcEvento);
+    await this.config.registro?.atualizar(chave, {
+      situacao: 'cancelada', protocoloCancelamento: r.protocolo ?? null, canceladaEm: this.agora().toISOString(), cStat: r.cStat, xMotivo: r.xMotivo,
+    }).catch((e) => { if ((e as NfceError).code !== 'REGISTRO_AUSENTE') throw e; });
   }
 
   /** Cancelamento por substituição (110112): cancela `chave` apontando a NFC-e substituta já autorizada. */
@@ -531,7 +653,7 @@ export class NfceClient {
       p.chave, TIPO_CANCELAMENTO_SUBSTITUICAO,
       detalheCancelamentoSubstituicao({ cOrgaoAutor: this.cUF, protocolo: p.protocolo, justificativa: p.justificativa, chaveSubstituta: p.chaveSubstituta, verAplic: this.config.versaoSoftware }),
     );
-    if (r.xmlProcEvento) await this.config.storage?.salvar('cancelamentos', p.chave, r.xmlProcEvento);
+    await this.registrarCancelamento(p.chave, r);
     return r;
   }
 
@@ -539,14 +661,20 @@ export class NfceClient {
   async inutilizar(p: { serie: number; numeroInicial: number; numeroFinal?: number; justificativa: string; cnpj?: string; ano?: number }): Promise<ResultadoInutilizacao> {
     const cnpj = p.cnpj ?? this.cert.documento;
     if (!cnpj || cnpj.length !== 14) throw new ValidationError('Informe `cnpj` do emitente (não foi possível obter do certificado).', ['cnpj']);
-    const ano = p.ano ?? new Date(Date.now() + this.fuso * 60000).getUTCFullYear();
+    this.conferirCertificado(cnpj);
+    const ano = p.ano ?? new Date(this.agora().getTime() + this.fuso * 60000).getUTCFullYear();
     const inut = montarInutilizacao({
       ambiente: this.ambiente, cUF: this.cUF, cnpj, ano, serie: p.serie, numeroInicial: p.numeroInicial, numeroFinal: p.numeroFinal ?? p.numeroInicial, justificativa: p.justificativa,
     });
     const assinado = assinarXml(inut.xml, 'infInut', 'inutNFe', this.cert);
     const r = S.parseRetInutNFe(await this.chamar('inutilizacao', assinado));
     const sucesso = r.cStat === '102';
-    if (sucesso) await this.config.storage?.salvar('inutilizacoes', inut.id, S.montarProcInut(assinado, r.xml));
+    if (sucesso) {
+      await this.config.storage?.salvar('inutilizacoes', inut.id, S.montarProcInut(assinado, r.xml));
+      await this.config.registro?.registrarInutilizacao({
+        cnpj: fmt.onlyDigits(cnpj), ambiente: this.ambiente, serie: p.serie, inicio: p.numeroInicial, fim: p.numeroFinal ?? p.numeroInicial, protocolo: r.nProt ?? null,
+      });
+    }
     return { sucesso, cStat: r.cStat, xMotivo: r.xMotivo, protocolo: r.nProt, xml: r.xml };
   }
 
@@ -569,30 +697,76 @@ export class Contingencia {
   }
 
   /**
-   * Emite em contingência offline: assina com tpEmis=9, gera QR Code offline e grava para transmissão posterior.
-   * `chaveOriginal` (uso interno): nota online que está sendo substituída; ela é preservada e não será reenviada.
+   * Emite em contingência offline (tpEmis=9), para uma venda **ainda não tentada online** (SEFAZ sabidamente fora,
+   * ou decisão explícita). Grava em `contingencia/` para transmissão por `processarPendentes`.
+   * Com `referencia` já registrada, devolve a nota existente (não cria outra).
    */
   async emitirOffline(
     nota: NotaNfce,
     motivo = 'Contingencia off-line por indisponibilidade de comunicacao com a SEFAZ',
-    opcoes: OpcoesEmissao & { chaveOriginal?: string } = {},
+    opcoes: OpcoesEmissao = {},
+  ): Promise<ResultadoEmissao> {
+    const reg = this.client.config.registro;
+    if (opcoes.referencia && reg) {
+      const existente = await reg.buscarPorReferencia(fmt.onlyDigits(nota.emitente.cnpj), this.client.ambiente, opcoes.referencia);
+      if (existente) return this.client.resultadoDoRegistro(existente, { semRede: true });
+    }
+    return this.emitirOfflineInterno(nota, motivo, opcoes);
+  }
+
+  /**
+   * Para uma venda cuja nota online ficou `pendente` com recebimento **incerto** (ex.: timeout): emite um cupom
+   * offline com **número novo** para o consumidor e marca a original como `substituida`. A original nunca é reenviada;
+   * `processarPendentes` a consulta e conclui: `descartada` (número para inutilizar) ou `conflito` (cancelar a original).
+   * Requer `registro`.
+   */
+  async substituirPendente(chave: string, nota: NotaNfce, motivo = 'Contingencia off-line: autorizacao online sem resposta'): Promise<ResultadoEmissao> {
+    const reg = this.client.config.registro;
+    if (!reg) throw new NfceError('`substituirPendente` requer `registro` configurado.', 'CONFIG');
+    const r0 = await reg.buscar(chave);
+    if (!r0 || r0.situacao !== 'pendente' || r0.tpEmis !== 1) {
+      throw new ValidationError(`A nota ${chave} não está pendente de envio online (situação: ${r0?.situacao ?? 'não registrada'}).`, ['chave']);
+    }
+    if (fmt.onlyDigits(nota.emitente.cnpj) !== r0.cnpj) throw new ValidationError('O CNPJ do emitente difere do da nota pendente.', ['emitente.cnpj']);
+    if (nota.numero !== undefined && nota.numero === r0.numero && nota.serie === r0.serie) {
+      throw new ValidationError('A nota de contingência precisa de outro número (a original pode ter sido recebida pela SEFAZ).', ['numero']);
+    }
+    return this.emitirOfflineInterno({ ...nota, numero: nota.numero }, motivo, {
+      referencia: r0.referencia ?? undefined, original: { chave, modo: 'substituida' },
+    });
+  }
+
+  /**
+   * @internal Emite offline. Com `original`: a nota online é tirada de `pendentes/` (guardada em `substituidas/`) e marcada
+   * `descartada` (mesmo número, SEFAZ certamente não recebeu) ou `substituida` (número novo, recebimento incerto).
+   */
+  async emitirOfflineInterno(
+    nota: NotaNfce, motivo: string,
+    opcoes: OpcoesEmissao & { original?: { chave: string; modo: 'descartada' | 'substituida' } },
   ): Promise<ResultadoEmissao> {
     const st = this.storage;
     const reg = this.client.config.registro;
     const n = await this.client.numerar(nota);
     const p = this.client.preparar(n, { offline: true, motivoContingencia: motivo });
-    if (opcoes.chaveOriginal) {
-      const orig = await st.ler('pendentes', opcoes.chaveOriginal);
-      if (orig) await st.salvar('substituidas', opcoes.chaveOriginal, orig);
-      await st.remover('pendentes', opcoes.chaveOriginal);
-      await reg?.atualizar(opcoes.chaveOriginal, { situacao: 'substituida', referencia: null });
+    const o = opcoes.original;
+    if (o) {
+      const orig = await st.ler('pendentes', o.chave);
+      if (orig) await st.salvar('substituidas', o.chave, orig);
+      await st.remover('pendentes', o.chave);
+      // Antes de registrar a nova nota: libera a referência (e, se descartada, o número).
+      await reg?.atualizar(o.chave, {
+        situacao: o.modo, referencia: null,
+        xMotivo: o.modo === 'descartada'
+          ? `Nao recebida pela SEFAZ (falha antes da conexao); substituida pela contingencia ${p.chave} com o mesmo numero.`
+          : `Recebimento incerto; substituida pela contingencia ${p.chave}. Aguardando consulta.`,
+      });
     }
     await st.salvar('contingencia', p.chave, p.xmlAssinado);
     const agora = agoraIso();
     await reg?.registrar({
       chave: p.chave, cnpj: fmt.onlyDigits(n.emitente.cnpj), uf: this.client.config.uf, ambiente: this.client.ambiente, serie: n.serie,
       numero: n.numero, tpEmis: 9, situacao: 'contingencia', valor: p.totais.vNF, emitidaEm: p.dhEmi, referencia: opcoes.referencia ?? null,
-      chaveOriginal: opcoes.chaveOriginal ?? null, tentativas: 0, criadaEm: agora, atualizadaEm: agora,
+      chaveOriginal: o?.chave ?? null, tentativas: 0, criadaEm: agora, atualizadaEm: agora,
     });
     return {
       status: 'contingencia', chave: p.chave, numero: n.numero, serie: n.serie, cStat: '', xMotivo: 'Emitida em contingência offline; pendente de transmissão',

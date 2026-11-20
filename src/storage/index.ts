@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 Lenderson Macedo — licença comercial disponível (ver COPYRIGHT.md).
-import { mkdir, readFile, readdir, rename, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, open, readFile, readdir, rename, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 
 /**
@@ -17,15 +17,31 @@ export interface Storage {
   remover(tipo: TipoDocumento, nome: string): Promise<void>;
 }
 
-/** Persistência em disco: `<raiz>/<tipo>/<nome>.xml`. */
+/**
+ * Persistência em disco: `<raiz>/<tipo>/<nome>.xml`.
+ * Gravação atômica e durável: escreve em arquivo temporário, `fsync`, `rename` e `fsync` do diretório,
+ * para que uma nota gravada "antes do envio" sobreviva a uma queda de energia.
+ * (S3 e Postgres seguem o contrato de durabilidade do provedor.)
+ */
 export class FileStorage implements Storage {
   constructor(private raiz: string) {}
   private dir(t: TipoDocumento) { return join(this.raiz, t); }
   async salvar(tipo: TipoDocumento, nome: string, conteudo: string) {
     await mkdir(this.dir(tipo), { recursive: true });
-    const tmp = join(this.dir(tipo), `.${nome}.tmp`);
-    await writeFile(tmp, conteudo, 'utf8');
-    await rename(tmp, join(this.dir(tipo), `${nome}.xml`));
+    const dir = this.dir(tipo);
+    const tmp = join(dir, `.${nome}.${process.pid}.tmp`);
+    const fh = await open(tmp, 'w');
+    try {
+      await fh.writeFile(conteudo, 'utf8');
+      await fh.sync();
+    } finally {
+      await fh.close();
+    }
+    await rename(tmp, join(dir, `${nome}.xml`));
+    try {
+      const d = await open(dir, 'r');
+      try { await d.sync(); } finally { await d.close(); }
+    } catch { /* fsync de diretório não suportado (ex.: Windows): o arquivo já está sincronizado */ }
   }
   async ler(tipo: TipoDocumento, nome: string) {
     try { return await readFile(join(this.dir(tipo), `${nome}.xml`), 'utf8'); } catch { return undefined; }

@@ -14,6 +14,7 @@ if (r.status === 'autorizada') await imprimir(await nfce.danfcePdf(r.xmlAutoriza
 ## Sumário
 
 - [Situação do projeto](#situação-do-projeto)
+- [Mudanças na v0.4](#mudanças-na-v04)
 - [Recursos](#recursos)
 - [Instalação](#instalação)
 - [Primeiros passos](#primeiros-passos)
@@ -37,7 +38,7 @@ if (r.status === 'autorizada') await imprimir(await nfce.danfcePdf(r.xmlAutoriza
 
 ## Situação do projeto
 
-> **Versão 0.3 — pronta para homologação (Simples Nacional e Regime Normal com IBS/CBS).**
+> **Versão 0.4 — pronta para homologação (Simples Nacional e Regime Normal com IBS/CBS), incluindo o Pará (SVRS).**
 > Ainda não testada contra uma SEFAZ real; os testes usam uma SEFAZ simulada e os XSDs oficiais.
 
 | Tema | Situação |
@@ -48,12 +49,27 @@ if (r.status === 'autorizada') await imprimir(await nfce.danfcePdf(r.xmlAutoriza
 | Registro das notas em banco e numeração automática (Postgres incluso) | ✅ Implementado (interfaces abertas para outros bancos) |
 | QR Code v2 (com CSC) e v3 (sem CSC) | ✅ Implementado (v2 conferido com os exemplos do manual) |
 | DANFCE em HTML e PDF (80 mm) | ✅ Implementado |
-| XML validado contra o XSD oficial (PL_010h) | ✅ Coberto por testes |
+| XML validado contra os XSDs oficiais (ver [`schemas/README.md`](schemas/README.md)) | ✅ Coberto por testes |
+| Cálculos fiscais em centavos inteiros (sem erro de ponto flutuante) | ✅ Implementado |
 | **Reforma tributária (IBS/CBS)** — Simples Nacional / MEI (CRT 1, 2, 4) | ✅ Não exigido até 2027 (NT 2025.002) |
 | **Reforma tributária (IBS/CBS)** — Regime Normal (CRT 3) | ✅ Grupo `IBSCBS` por item, redução de alíquota, `IBSCBSTot`, `vItem`, `vNFTot` (NT 2025.002 v1.53; tabela cClassTrib v1.71) |
 | IBS/CBS: diferimento, crédito presumido, monofásico (combustíveis), compras governamentais | ❌ Fora do escopo (raros ou proibidos em NFC-e) |
-| ICMS-ST (CST 10/30/70), IPI, ISSQN, Imposto Seletivo | ❌ Fora do escopo da v0.1 |
-| URLs de todas as UFs | ⚠️ Parcial: SP, MG, PR e UFs atendidas pela SVRS. As demais precisam ser informadas em `endpoints` |
+| ICMS-ST (CST 10/30/70), IPI, ISSQN, Imposto Seletivo | ❌ Fora do escopo |
+| URLs das 27 UFs (serviços, QR Code, consulta) | ✅ Tabela embutida (fonte: sped-nfe) — confira no nfce.encat.org antes de produção |
+
+## Mudanças na v0.4
+
+Correções a partir de uma revisão da v0.3. Atenção às mudanças de comportamento:
+
+- **Contingência automática mais segura.** Só emite offline automaticamente quando é **certo** que a SEFAZ não recebeu a nota (conexão recusada, DNS, falha de TLS, SEFAZ 108/109) — e aí usa o **mesmo número**. Se o recebimento for incerto (timeout, conexão caída no meio), a nota fica `pendente` e o erro sai com `retentavel` e `chave`; nada de segunda nota automática. Para dar um cupom ao consumidor nesse caso, chame `contingencia.substituirPendente(chave, nota)` (número novo).
+- **Todas as UFs**, incluindo **Pará**, BA, CE, MA e PE (antes faltavam), com URLs de QR Code e consulta.
+- **Dinheiro em centavos inteiros**: soma de itens, ICMS, PIS/COFINS, IBS/CBS, `vNF` e troco sem erro de float.
+- **Certificado x emitente**: notas de outra empresa (raiz de CNPJ diferente) são recusadas antes de assinar.
+- **TLS ICP-Brasil**: `carregarCadeiaIcpBrasil()` + `transporte.casAdicionais`; erro de certificado vem com instrução.
+- **Numeração**: um único número por nota viva (índice único no Postgres), inutilizações registradas, `buracos()` correto, `definirInicio` não volta a numeração, `reemitir` não reaproveita número ocupado.
+- **Cancelamento** atualiza o registro (`cancelada`).
+- **Prazo da contingência** sinalizado em `processarPendentes` (`prazo.situacao`: `ok` / `alerta` / `vencido`).
+- **Interfaces**: `RegistroNotas` ganhou `buscarPorNumero` e `registrarInutilizacao`; erros ganharam `naoRecebido`. Quem implementou o próprio registro precisa adicionar os dois métodos. Rode `criarTabelas()` de novo (migração idempotente).
 
 ---
 
@@ -190,6 +206,7 @@ CNPJ/CPF, GTIN, NCM, CFOP, CEST, município (IBGE), CEP, série (0–889), núme
 | Concluir nota pendente | `retomar(chave)` | `ResultadoEmissao` |
 | Processar pendentes (cron/fila) | `processarPendentes({ limite?, cnpj? })` | `ResultadoEmissao[]` (nunca lança) |
 | Reemitir rejeitada (mesmo número) | `reemitir(chave, notaCorrigida)` | `ResultadoEmissao` |
+| Cupom offline para venda pendente incerta | `contingencia.substituirPendente(chave, nota)` | `ResultadoEmissao` (`status: 'contingencia'`, número novo) |
 | Montar e assinar sem enviar | `preparar(nota, { offline? })` | `{ chave, xmlAssinado, qrCode, urlChave, totais }` |
 | Consultar por chave | `consultar(chave)` | `{ situacao: 'autorizada' \| 'cancelada' \| 'denegada' \| 'inexistente' \| 'outra', protocolo, eventos }` |
 | Cancelar | `cancelar({ chave, protocolo, justificativa })` | `ResultadoEvento` |
@@ -279,29 +296,48 @@ new NfceClient({ /* ... */ ibsCbsPadrao: { cClassTrib: '000001' } }); // tributa
 
 ## Contingência offline
 
-Quando a SEFAZ não responde, a NFC-e pode ser emitida offline (`tpEmis=9`) e transmitida depois (em geral, em até 24 h — confira o prazo da sua UF).
+Quando a SEFAZ não responde, a NFC-e pode ser emitida offline (`tpEmis=9`) e transmitida depois. **Prazo:** a regra nacional é o fim do primeiro dia útil seguinte à emissão; algumas UFs (como o Pará) usam 24 h — confira a regra vigente. A biblioteca sinaliza o prazo, mas **agendar `processarPendentes` é obrigação de quem usa** (cron, fila, worker).
+
+### Três situações diferentes
+
+| Situação | O que a biblioteca faz | O que você faz |
+|---|---|---|
+| SEFAZ **sabidamente fora** antes de tentar (ex.: `status()` deu 108) | — | `contingencia.emitirOffline(nota)` |
+| Tentativa online falhou e é **certo** que a SEFAZ não recebeu (conexão recusada, DNS, TLS, 108/109) | com `contingenciaAutomatica`: emite offline com o **mesmo número**; a chave online vira `descartada` | imprimir o DANFCE de contingência |
+| Tentativa online com recebimento **incerto** (timeout, conexão caída no meio) | **não** cria outra nota; fica `pendente` e lança erro `retentavel` com `chave` | esperar `processarPendentes` (até 5 min a mesma nota ainda pode ser autorizada) **ou** dar o cupom com `contingencia.substituirPendente(chave, nota)` |
+
+Por que essa diferença: uma nota online cuja resposta se perdeu pode ter sido autorizada. Emitir outra com o mesmo número geraria rejeição 539; emitir outra e não acompanhar a primeira deixaria a venda com duas notas. Por isso a segunda nota só é automática quando não há dúvida.
 
 ```ts
-// Automática: basta configurar contingenciaAutomatica: true + storage
-const r = await nfce.emitir(nota); // r.status === 'contingencia' se a SEFAZ estiver fora
+const nfce = new NfceClient({ /* ... */ contingenciaAutomatica: true, storage, registro, numerador });
 
-// Manual
-await nfce.contingencia.emitirOffline(nota, 'Queda do link de internet');
+try {
+  const r = await nfce.emitir(nota, { referencia: pedido.id });
+  imprimir(r); // 'autorizada' ou 'contingencia'
+} catch (e) {
+  if (e instanceof NfceError && e.retentavel && e.chave) {
+    // incerto: o consumidor está no caixa — emitir cupom de contingência com outro número
+    const off = await nfce.contingencia.substituirPendente(e.chave, nota);
+    imprimir(off);
+  } else throw e;
+}
 
-// Agende a retransmissão (ex.: a cada 5 minutos)
-setInterval(async () => {
-  for (const r of await nfce.contingencia.transmitirPendentes()) {
-    console.log(r.chave, r.status, r.cStat);
-  }
-}, 5 * 60_000);
+// agendado (ex.: a cada 2 minutos)
+for (const r of await nfce.processarPendentes()) {
+  if (r.prazo?.situacao === 'vencido' || r.prazo?.situacao === 'alerta') alertar(r);
+  if (r.status === 'conflito') alertar(r); // cancelar a nota original (ver abaixo)
+}
 ```
 
-Como funciona:
+Como `processarPendentes` resolve cada caso:
 
-1. A nota é assinada com `tpEmis=9`, `dhCont`, `xJust` e QR Code offline, e salva em `storage` (`contingencia/`).
-2. O DANFCE sai com "EMITIDA EM CONTINGÊNCIA — Pendente de autorização".
-3. Na retransmissão, cada chave é **consultada antes** do reenvio. Autorizadas vão para `autorizadas/`; rejeitadas vão para `rejeitadas/` e precisam de tratamento manual (por exemplo, emitir uma nova nota e cancelar por substituição).
-4. Na contingência automática, a nota online que falhou é guardada em `substituidas/` e **nunca é reenviada**. Se ela tiver sido autorizada sem a resposta chegar, a cópia offline não é transmitida e volta com `status: 'conflito'` para tratamento manual.
+1. **Contingência (`tpEmis=9`)**: consulta e transmite. Prazo em `r.prazo` (`ok`, `alerta` após 18 h, `vencido` após 24 h — `prazoContingencia: { horas, alertaHoras }`); a transmissão é tentada mesmo vencida.
+2. **Pendente online**: consulta; se a SEFAZ não conhece, reenvia o **mesmo XML**. Depois de 5 minutos do `dhEmi` a SEFAZ rejeita (704, regra B09-40) → `rejeitada`; use `reemitir(chave, nota)` (mesmo número).
+3. **Substituída** (`substituirPendente`): **nunca** é reenviada, só consultada:
+   - apareceu **autorizada** → `conflito`: a venda ficou com duas notas; **cancele a original** (`cancelar`) dentro do prazo da UF;
+   - SEFAZ não conhece e já passou a janela de 5 min (+5 de margem) → `descartada`: o número aparece em `buracos()` para inutilizar.
+
+O DANFCE de contingência sai com "EMITIDA EM CONTINGÊNCIA — Pendente de autorização". As notas online abandonadas ficam guardadas em `storage` (`substituidas/`).
 
 ---
 
@@ -410,7 +446,7 @@ const r = await nfce.emitir(notaSemNumero, { referencia: `pedido-${pedido.id}` }
 
 Os adaptadores Postgres **não dependem de nenhum pacote**: recebem qualquer objeto com `query(sql, params)` — `pg.Pool`, `pg.Client`, uma transação (`PoolClient`) ou PGlite. Opção `{ schema: 'fiscal' }` para usar outro schema.
 
-Tabelas criadas: `nfce_sequencia` (uma linha por CNPJ + ambiente + modelo + série) e `nfce_nota` (uma linha por chave, com `referencia` única por CNPJ/ambiente).
+Tabelas criadas: `nfce_sequencia` (uma linha por CNPJ + ambiente + modelo + série), `nfce_nota` (uma linha por chave; `referencia` única por CNPJ/ambiente; **um único número por nota viva** — rejeitadas e descartadas não ocupam o número) e `nfce_inutilizacao` (faixas inutilizadas). `criarTabelas` é idempotente e também atualiza bancos criados na v0.3.
 
 ### O que acontece em `emitir`
 
@@ -418,7 +454,7 @@ Tabelas criadas: `nfce_sequencia` (uma linha por CNPJ + ambiente + modelo + sér
 2. Valida a nota e, se não houver `numero`, pede ao `numerador` (só depois de validar: erro de validação não gasta número).
 3. Assina e **grava antes de enviar**: XML em `storage` (`pendentes/`) e registro com `situacao: 'pendente'`. A chave fica fixada.
 4. Envia com **retentativa curta** em falha temporária (padrão: 3 tentativas; `retentativas: { tentativas, esperasMs }`).
-5. Se ainda falhar, **consulta a chave** (a SEFAZ pode ter autorizado sem a resposta chegar). Se não, a nota fica `pendente` e o erro sai com `retentavel: true` e `chave` — ou vai para contingência, se `contingenciaAutomatica`.
+5. Se ainda falhar, **consulta a chave** (a SEFAZ pode ter autorizado sem a resposta chegar). Se não, a nota fica `pendente` e o erro sai com `retentavel: true` e `chave` — ou vai para contingência com o mesmo número, se `contingenciaAutomatica` e for **certo** que a SEFAZ não recebeu (ver [Contingência offline](#contingência-offline)).
 6. Resultado definitivo → registro atualizado (`autorizada`, `rejeitada`, `denegada`, protocolo, tentativas) e XML movido.
 
 ### Concluindo o que ficou pendente
@@ -451,12 +487,18 @@ if (r.status === 'rejeitada') {
   await nfce.reemitir(r.chave, notaCorrigida);
 }
 
-// Números entregues sem nota válida (ex.: requisições repetidas, falhas antes do envio) — para inutilizar
+// Números entregues sem nota que os ocupe (requisições repetidas, falhas antes do envio, notas descartadas)
 const buracos = await new PostgresRegistro(pool).buracos({ cnpj, ambiente: 'producao', serie: 1 });
-if (buracos.length) await nfce.inutilizar({ serie: 1, numeroInicial: buracos[0], numeroFinal: buracos[0], justificativa: 'Numero reservado e nao utilizado' });
+for (const n of buracos) {
+  await nfce.inutilizar({ serie: 1, numeroInicial: n, justificativa: 'Numero reservado e nao utilizado' });
+} // inutilizações bem-sucedidas são registradas e deixam de aparecer em buracos()
 ```
 
-`PostgresNumerador.definirInicio(seq, 5001)` faz a numeração continuar de onde o emissor anterior parou.
+`reemitir` recusa o número se outra nota viva já o ocupa (por exemplo, numa segunda reemissão da mesma chave rejeitada).
+
+`PostgresNumerador.definirInicio(seq, 5001)` faz a numeração continuar de onde o emissor anterior parou. Ele **recusa voltar** a numeração (número ≤ último entregue), salvo `{ forcar: true }` — perigoso: só use se tiver certeza de que os números não foram usados.
+
+**Cancelamento:** `cancelar` e `cancelarPorSubstituicao` atualizam o registro para `cancelada` (com `protocoloCancelamento` e `canceladaEm`); repetir `emitir` com a mesma `referencia` devolve `status: 'cancelada'`. O prazo de cancelamento é definido por cada UF (em várias é curto); a biblioteca não o controla — a SEFAZ rejeita fora do prazo.
 
 ### Situações no registro
 
@@ -464,13 +506,14 @@ if (buracos.length) await nfce.inutilizar({ serie: 1, numeroInicial: buracos[0],
 |---|---|
 | `pendente` | gravada, sem resposta definitiva — `processarPendentes` conclui |
 | `contingencia` | emitida offline, aguardando transmissão |
-| `autorizada` / `rejeitada` / `denegada` | resposta definitiva da SEFAZ |
-| `substituida` | nota online trocada por uma de contingência (não é reenviada) |
-| `conflito` | a original apareceu autorizada depois da contingência — tratar manualmente |
+| `autorizada` / `rejeitada` / `denegada` / `cancelada` | resposta definitiva da SEFAZ |
+| `substituida` | nota online incerta trocada por contingência com outro número (só consultada, nunca reenviada) |
+| `descartada` | a SEFAZ certamente não tem a nota; número livre (reaproveitado ou em `buracos`) |
+| `conflito` | nota substituída que acabou autorizada — cancele-a |
 
 ### Outro banco
 
-Implemente `RegistroNotas` (`registrar`, `atualizar`, `buscar`, `buscarPorReferencia`, `pendentes`) e/ou `Numerador` (`proximo`). Requisitos: `registrar` deve recusar chave ou referência repetida com `RegistroDuplicadoError`, e `proximo` deve ser atômico.
+Implemente `RegistroNotas` (`registrar`, `atualizar`, `buscar`, `buscarPorReferencia`, `buscarPorNumero`, `pendentes`, `registrarInutilizacao`) e/ou `Numerador` (`proximo`). Requisitos: `registrar`/`atualizar` devem recusar com `RegistroDuplicadoError` chave ou referência repetida e duas notas vivas no mesmo número (situações fora de `SITUACOES_SEM_NUMERO`); `pendentes` devolve `pendente`, `contingencia` e `substituida`; `proximo` deve ser atômico. O `MemoryRegistro` é uma referência simples dessas regras.
 
 ---
 
@@ -486,7 +529,7 @@ Implemente `RegistroNotas` (`registrar`, `atualizar`, `buscar`, `buscarPorRefere
 | `storage` | `Storage` | `new S3Storage({ bucket })`, `new FileStorage(pasta)`, `new MemoryStorage()` ou implementação própria; obrigatório para contingência |
 | `contingenciaAutomatica` | `boolean` | SEFAZ fora ⇒ emite offline |
 | `endpoints` | `EndpointsOverride` | URLs de serviços, QR Code e consulta |
-| `transporte` | `{ timeoutMs, ca, rejectUnauthorized, fetchImpl }` | rede/TLS; `fetchImpl` para mocks |
+| `transporte` | `{ timeoutMs, casAdicionais, ca, rejectUnauthorized, fetchImpl }` | rede/TLS; `casAdicionais` = cadeia ICP-Brasil; `fetchImpl` para mocks |
 | `responsavelTecnico` | `{ cnpj, contato, email, fone, csrt? }` | grupo `infRespTec` (+ hash CSRT) |
 | `versaoSoftware` | `string` | vai em `verProc` |
 | `fusoMinutos` | `number` | padrão pelo fuso da UF (ex.: −180, AM −240, AC −300) |
@@ -494,50 +537,79 @@ Implemente `RegistroNotas` (`registrar`, `atualizar`, `buscar`, `buscarPorRefere
 | `registro` | `RegistroNotas` | estado das notas em banco (`PostgresRegistro`); exige `storage` |
 | `numerador` | `Numerador` | fornece `numero` quando a nota não traz (`PostgresNumerador`) |
 | `retentativas` | `{ tentativas?, esperasMs? }` | padrão 3 tentativas, esperas 500/1500 ms |
+| `prazoContingencia` | `{ horas?, alertaHoras? }` | padrão 24 h / alerta em 18 h |
+| `relogio` | `() => Date` | relógio (testes) |
 
 ---
 
 ## URLs por UF (endpoints)
 
-A tabela embutida cobre **SP, MG, PR** e os serviços das UFs atendidas pela **SVRS** (AC, AL, AP, DF, ES, PB, PI, RJ, RN, RO, RR, SC, SE, TO). Para as UFs da SVRS ainda é preciso informar a URL do QR Code e da consulta. As URLs oficiais estão no Portal Nacional da NFC-e (nfce.encat.org → Desenvolvedor).
+A biblioteca traz a tabela das **27 UFs** (serviços, URL do QR Code e URL de consulta por chave) gerada por `scripts/gerar-endpoints.mjs` a partir das tabelas mantidas pelo projeto [sped-nfe](https://github.com/nfephp-org/sped-nfe). A data da geração fica em `ENDPOINTS_GERADOS_EM`.
+
+| Autorizador | UFs |
+|---|---|
+| **SVRS** (SEFAZ Virtual do RS) | AC, AL, AP, BA, CE, DF, ES, MA, **PA**, PB, PE, PI, RJ, RN, RO, RR, SC, SE, TO |
+| Próprio | AM, GO, MG, MS, MT, PR, RS, SP |
+
+**Pará:**
+
+| | Homologação | Produção |
+|---|---|---|
+| Webservices (SVRS) | `https://nfce-homologacao.svrs.rs.gov.br/ws/...` | `https://nfce.svrs.rs.gov.br/ws/...` |
+| QR Code | `https://appnfc.sefa.pa.gov.br/portal-homologacao/view/consultas/nfce/nfceForm.seam` | `https://appnfc.sefa.pa.gov.br/portal/view/consultas/nfce/nfceForm.seam` |
+| Consulta por chave (`urlChave`) | `www.sefa.pa.gov.br/nfce/consulta` | `www.sefa.pa.gov.br/nfce/consulta` |
+
+> ⚠️ As URLs mudam com o tempo. **Confira as da sua UF no Portal Nacional da NFC-e** (nfce.encat.org → Desenvolvedor → URL por UF do QR Code) e no portal do autorizador (SVRS: dfe-portal.svrs.rs.gov.br/Nfce/Servicos) antes de entrar em produção. Para atualizar a tabela: `node scripts/gerar-endpoints.mjs`.
+
+Para corrigir uma UF sem esperar nova versão:
 
 ```ts
 new NfceClient({
   // ...
   endpoints: {
-    RJ: {
-      homologacao: {
-        qrCode: 'https://<url-do-qrcode-da-UF>',       // conferir no nfce.encat.org
-        urlChave: 'https://<url-de-consulta-da-UF>',
-      },
-    },
-    BA: {
-      producao: {
-        servicos: { autorizacao: 'https://...', consultaProtocolo: 'https://...', /* ... */ },
-        qrCode: 'https://...', urlChave: 'https://...',
-      },
+    PA: {
+      producao: { qrCode: 'https://<url-do-qrcode>', urlChave: 'www.sefa.pa.gov.br/nfce/consulta' },
     },
   },
 });
 ```
 
-Serviços: `autorizacao`, `retAutorizacao`, `consultaProtocolo`, `statusServico`, `inutilizacao`, `recepcaoEvento`.
-
-> ⚠️ As URLs mudam com o tempo. Confira as de sua UF antes de entrar em produção.
+Serviços: `autorizacao`, `retAutorizacao`, `consultaProtocolo`, `statusServico`, `inutilizacao`, `recepcaoEvento`. A `urlChave` precisa ter de 21 a 85 caracteres (XSD).
 
 ---
 
 ## Certificado e TLS
 
+### Certificado do emitente (A1)
+
 - Use um certificado **A1** (`.pfx`/`.p12`). O CNPJ é lido do certificado quando possível (usado na inutilização).
 - O cliente recusa certificado vencido.
-- Os servidores da SEFAZ usam a cadeia **ICP-Brasil**, que não vem no Node. Baixe a cadeia no site do ITI e informe:
+- **Conferência com o emitente:** se o CN do certificado traz o CNPJ, a biblioteca recusa (com `CertificateError`, antes de assinar) notas e inutilizações de empresa com **raiz de CNPJ** diferente — a mesma regra da SEFAZ (rejeição 213), que permite o certificado da matriz assinar para as filiais. Se o certificado não traz CNPJ no CN (ou é e-CPF), a conferência fica a cargo de quem chama.
 
-```ts
-transporte: { ca: [readFileSync('icp-brasil-raiz-v5.crt'), readFileSync('ac-intermediaria.crt')] }
+### Cadeia ICP-Brasil (conexão com a SEFAZ)
+
+Os servidores da SEFAZ usam certificados da cadeia **ICP-Brasil**, que **não** vem no Node. Sem ela, a primeira chamada real falha com:
+
+```
+TransportError: Não foi possível validar o certificado TLS de nfce-homologacao.svrs.rs.gov.br (UNABLE_TO_GET_ISSUER_CERT_LOCALLY)...
 ```
 
-Evite `rejectUnauthorized: false` em produção.
+Passo a passo:
+
+1. Baixe o pacote de certificados das ACs do repositório do ITI (Instituto Nacional de Tecnologia da Informação): página "Repositório" da ICP-Brasil em gov.br/iti — arquivo com todas as ACs (ex.: `ACcompactado.zip`).
+2. Descompacte numa pasta do servidor (ex.: `./certs/icp-brasil`). Arquivos `.crt`, `.cer` ou `.pem`, em PEM ou DER, são aceitos.
+3. Informe a cadeia:
+
+```ts
+import { carregarCadeiaIcpBrasil } from 'zexon-nfce';
+
+new NfceClient({
+  // ...
+  transporte: { casAdicionais: carregarCadeiaIcpBrasil(process.env.SEFAZ_CA_DIR ?? './certs/icp-brasil') },
+});
+```
+
+`casAdicionais` **soma** a cadeia aos certificados confiáveis do Node (alguns autorizadores usam certificados comerciais). A opção `ca` substitui todos — só use se souber o que faz. A cadeia não vem embutida no pacote para não ficar desatualizada; atualize a pasta quando o ITI publicar novas ACs. **Não** use `rejectUnauthorized: false`, nem em homologação.
 
 ---
 
@@ -546,7 +618,7 @@ Evite `rejectUnauthorized: false` em produção.
 | Classe | Quando |
 |---|---|
 | `ValidationError` | nota inválida antes do envio (`campos` lista os caminhos com problema) |
-| `TransportError` | timeout, DNS, TLS, HTTP — `retentavel: true` |
+| `TransportError` | timeout, DNS, HTTP — `retentavel: true`; falha de certificado TLS — `retentavel: false` (configuração) |
 | `SefazError` | SEFAZ indisponível (cStat 108/109/999) — `retentavel: true` |
 | `RegistroDuplicadoError` | chave ou referência já registrada |
 | `CertificateError` | PFX inválido, senha errada, certificado vencido |
@@ -554,7 +626,7 @@ Evite `rejectUnauthorized: false` em produção.
 
 Rejeições de negócio **não** lançam exceção: voltam em `status: 'rejeitada'` com `cStat` e `xMotivo`.
 
-Todo `NfceError` tem `retentavel` (vale repetir mais tarde?) e, quando a nota já foi gravada, `chave` — use-a em `retomar(chave)` ou na sua fila.
+Todo `NfceError` tem `retentavel` (vale repetir mais tarde?), `naoRecebido` (é **certo** que a SEFAZ não recebeu?) e, quando a nota já foi gravada, `chave` — use-a em `retomar(chave)`, na sua fila ou em `contingencia.substituirPendente`.
 
 ```ts
 try {
@@ -570,13 +642,13 @@ try {
 
 ## Checklist de homologação
 
-1. Solicitar o CSC de homologação no portal da SEFAZ.
+1. Configurar a cadeia ICP-Brasil (`casAdicionais`) e solicitar o CSC de homologação no portal da SEFAZ.
 2. `status()` deve retornar `cStat 107`.
 3. Emitir notas com cada meio de pagamento que a loja usa (dinheiro com troco, cartão, PIX).
 4. Emitir com e sem CPF do consumidor.
 5. Cancelar uma nota (dentro do prazo da UF).
 6. Inutilizar uma faixa.
-7. Simular queda de rede, emitir offline e retransmitir.
+7. Simular queda de rede, emitir offline e retransmitir; testar `substituirPendente` e conferir a resolução por `processarPendentes`.
 8. Derrubar o processo durante um envio e conferir que `processarPendentes()` conclui a mesma chave.
 9. Ler o QR Code impresso com o celular e conferir a consulta pública.
 10. Imprimir o DANFCE na impressora térmica real.
@@ -593,15 +665,17 @@ src/
   xml/                   chave de acesso, montagem do infNFe, assinatura
   qrcode/                QR Code v2/v3 online e offline
   rtc/                   IBS/CBS: cálculo e tabela oficial de cClassTrib/CST
-  sefaz/                 endpoints por UF, SOAP 1.2, parse de retornos
+  sefaz/                 endpoints das 27 UFs (endpoints-dados.ts gerado), SOAP 1.2, parse de retornos
   events/                cancelamento, substituição, inutilização
   danfce/                HTML e PDF
   storage/               S3Storage, FileStorage, MemoryStorage
   registro/              interface RegistroNotas + MemoryRegistro
   numerador/             interface Numerador + MemoryNumerador
   postgres/              PostgresRegistro, PostgresNumerador, criarTabelas (sem dependências)
-  errors/                hierarquia de erros
-schemas/                 XSDs oficiais (PL_010h + serviços + eventos)
+  errors/                hierarquia de erros (retentavel, naoRecebido)
+  util/dinheiro.ts       aritmética fiscal em centavos inteiros
+scripts/                 gerar-endpoints.mjs (atualiza a tabela de URLs)
+schemas/                 XSDs oficiais (origem em schemas/README.md)
 test/                    unitários, XSD, SEFAZ simulada, Postgres (PGlite) e cenários de falha
 examples/                exemplo de ponta a ponta
 ```
@@ -617,7 +691,7 @@ npm run typecheck
 npm run build       # dist/ ESM + CJS + .d.ts
 ```
 
-Exemplo real em homologação: `examples/emitir.ts` (lê `CERT_PFX`, `CERT_SENHA`, `CSC_ID`, `CSC`, `EMIT_CNPJ`, `EMIT_IE` do ambiente).
+Exemplo de API para o Pará em homologação: `examples/emitir.ts` (lê `CERT_PFX`, `CERT_SENHA`, `CSC_ID`, `CSC`, `EMIT_CNPJ`, `EMIT_IE`, `DATABASE_URL`, `S3_BUCKET` e `SEFAZ_CA_DIR` do ambiente; requer `npm install pg`).
 
 ---
 
@@ -630,7 +704,8 @@ Portal Nacional da NF-e (nfe.fazenda.gov.br):
 - Manual de Especificações da Contingência Offline para NFC-e, versão 2.0
 - NT 2025.002 v1.53 — Reforma Tributária (IBS/CBS/IS)
 - Tabela de Classificação Tributária do IBS e CBS (IT 2025.002 v1.71) e Tabela de Alíquotas da CBS
-- Esquemas XML: pacote PL_010h e PL_009q (serviços), eventos de cancelamento e cancelamento por substituição
+- Esquemas XML: ver [`schemas/README.md`](schemas/README.md)
+- Tabelas de URLs por UF: projeto nfephp-org/sped-nfe (conferir no nfce.encat.org)
 
 ## Licença
 

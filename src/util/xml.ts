@@ -1,12 +1,17 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 Lenderson Macedo — licença comercial disponível (ver COPYRIGHT.md).
+import { paraUnidades, unidadesParaTexto } from './dinheiro.js';
+
 const ESC: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' };
 
 export function esc(v: string | number): string {
   return String(v).replace(/[&<>"']/g, (c) => ESC[c]!);
 }
 
-/** Remove acentos/caracteres inválidos e colapsa espaços (regra do leiaute para textos). */
+/**
+ * Normaliza textos livres: troca quebras de linha/tabulação por espaço, colapsa espaços repetidos e apara as pontas.
+ * Não remove acentos: o leiaute aceita UTF-8.
+ */
 export function sanitizeText(v: string): string {
   return v
     .replace(/[\r\n\t]+/g, ' ')
@@ -33,9 +38,9 @@ export function group(name: string, children: string | string[], attrs: Record<s
 }
 
 export const fmt = {
-  /** Decimal com n casas, ponto como separador. */
+  /** Decimal com n casas, ponto como separador (arredondamento decimal exato, meio para cima). */
   dec(v: number, casas: number): string {
-    return (Math.round((v + Number.EPSILON) * 10 ** casas) / 10 ** casas).toFixed(casas);
+    return unidadesParaTexto(paraUnidades(v, casas), casas);
   },
   money(v: number): string {
     return fmt.dec(v, 2);

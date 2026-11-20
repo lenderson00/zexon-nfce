@@ -7,6 +7,7 @@ import { UF_CODIGO, gerarCNF, montarChave } from './chave.js';
 import { dhFormat, fmt, group, sanitizeText, tag } from '../util/xml.js';
 import { ValidationError } from '../errors/index.js';
 import { calcularIbsCbs, somaTributosNoItem, totalIbsCbsXml } from '../rtc/index.js';
+import { aplicarAliquota, centavosParaReais, centavosParaXml, reaisParaCentavos, reduzirBase, valorDoItem } from '../util/dinheiro.js';
 
 export const NFE_NS = 'http://www.portalfiscal.inf.br/nfe';
 export const HOMOLOG_TXT = 'NOTA FISCAL EMITIDA EM AMBIENTE DE HOMOLOGACAO - SEM VALOR FISCAL';
@@ -37,15 +38,20 @@ export interface NfceMontada {
   cDV: number;
 }
 
-const r2 = (v: number) => Math.round((v + Number.EPSILON) * 100) / 100;
+/** Acumuladores em centavos inteiros. */
+interface Soma { vProd: number; vDesc: number; vFrete: number; vSeg: number; vOutro: number; vBC: number; vICMS: number; vPIS: number; vCOFINS: number; vTotTrib: number }
 
-function icmsXml(i: IcmsItem, itemBase: number, tot: Totais): string {
+const C = reaisParaCentavos;
+const X = centavosParaXml;
+
+/** Grupo de ICMS do item. `baseItem` em centavos; acumula vBC/vICMS (centavos) em `t`. */
+function icmsXml(i: IcmsItem, baseItem: number, t: Soma): string {
   const o = tag('orig', i.origem);
+  const cred = (al: number, valor?: number) => (valor !== undefined ? C(valor) : aplicarAliquota(baseItem, al));
   if ('csosn' in i) {
     const c = i.csosn;
     if (c === '101') {
-      const v = i.valorCreditoSN ?? r2((itemBase * i.aliquotaCreditoSN) / 100);
-      return group('ICMSSN101', [o, tag('CSOSN', c), tag('pCredSN', fmt.dec(i.aliquotaCreditoSN, 4)), tag('vCredICMSSN', fmt.money(v))]);
+      return group('ICMSSN101', [o, tag('CSOSN', c), tag('pCredSN', fmt.dec(i.aliquotaCreditoSN, 4)), tag('vCredICMSSN', X(cred(i.aliquotaCreditoSN, i.valorCreditoSN)))]);
     }
     if (c === '500') {
       return group('ICMSSN500', [
@@ -59,14 +65,13 @@ function icmsXml(i: IcmsItem, itemBase: number, tot: Totais): string {
     if (c === '900') {
       const parts = [o, tag('CSOSN', c)];
       if (i.aliquota !== undefined) {
-        const bc = i.baseCalculo ?? itemBase;
-        const v = i.valor ?? r2((bc * i.aliquota) / 100);
-        tot.vBC += bc; tot.vICMS += v;
-        parts.push(tag('modBC', 3), tag('vBC', fmt.money(bc)), tag('pICMS', fmt.dec(i.aliquota, 4)), tag('vICMS', fmt.money(v)));
+        const bc = i.baseCalculo !== undefined ? C(i.baseCalculo) : baseItem;
+        const v = i.valor !== undefined ? C(i.valor) : aplicarAliquota(bc, i.aliquota);
+        t.vBC += bc; t.vICMS += v;
+        parts.push(tag('modBC', 3), tag('vBC', X(bc)), tag('pICMS', fmt.dec(i.aliquota, 4)), tag('vICMS', X(v)));
       }
       if (i.aliquotaCreditoSN !== undefined) {
-        const v = i.valorCreditoSN ?? r2((itemBase * i.aliquotaCreditoSN) / 100);
-        parts.push(tag('pCredSN', fmt.dec(i.aliquotaCreditoSN, 4)), tag('vCredICMSSN', fmt.money(v)));
+        parts.push(tag('pCredSN', fmt.dec(i.aliquotaCreditoSN, 4)), tag('vCredICMSSN', X(cred(i.aliquotaCreditoSN, i.valorCreditoSN))));
       }
       return group('ICMSSN900', parts);
     }
@@ -74,16 +79,16 @@ function icmsXml(i: IcmsItem, itemBase: number, tot: Totais): string {
   }
   switch (i.cst) {
     case '00': {
-      const bc = i.baseCalculo ?? itemBase;
-      const v = i.valor ?? r2((bc * i.aliquota) / 100);
-      tot.vBC += bc; tot.vICMS += v;
-      return group('ICMS00', [o, tag('CST', '00'), tag('modBC', 3), tag('vBC', fmt.money(bc)), tag('pICMS', fmt.dec(i.aliquota, 4)), tag('vICMS', fmt.money(v))]);
+      const bc = i.baseCalculo !== undefined ? C(i.baseCalculo) : baseItem;
+      const v = i.valor !== undefined ? C(i.valor) : aplicarAliquota(bc, i.aliquota);
+      t.vBC += bc; t.vICMS += v;
+      return group('ICMS00', [o, tag('CST', '00'), tag('modBC', 3), tag('vBC', X(bc)), tag('pICMS', fmt.dec(i.aliquota, 4)), tag('vICMS', X(v))]);
     }
     case '20': {
-      const bc = i.baseCalculo ?? r2(itemBase * (1 - i.reducaoBase / 100));
-      const v = i.valor ?? r2((bc * i.aliquota) / 100);
-      tot.vBC += bc; tot.vICMS += v;
-      return group('ICMS20', [o, tag('CST', '20'), tag('modBC', 3), tag('pRedBC', fmt.dec(i.reducaoBase, 4)), tag('vBC', fmt.money(bc)), tag('pICMS', fmt.dec(i.aliquota, 4)), tag('vICMS', fmt.money(v))]);
+      const bc = i.baseCalculo !== undefined ? C(i.baseCalculo) : reduzirBase(baseItem, i.reducaoBase);
+      const v = i.valor !== undefined ? C(i.valor) : aplicarAliquota(bc, i.aliquota);
+      t.vBC += bc; t.vICMS += v;
+      return group('ICMS20', [o, tag('CST', '20'), tag('modBC', 3), tag('pRedBC', fmt.dec(i.reducaoBase, 4)), tag('vBC', X(bc)), tag('pICMS', fmt.dec(i.aliquota, 4)), tag('vICMS', X(v))]);
     }
     case '40': case '41': case '50':
       return group('ICMS40', [o, tag('CST', i.cst)]);
@@ -96,38 +101,40 @@ function icmsXml(i: IcmsItem, itemBase: number, tot: Totais): string {
         i.valorSTRetido !== undefined ? tag('vICMSSTRet', fmt.money(i.valorSTRetido)) : '',
       ]);
     case '90': {
-      const bc = i.baseCalculo ?? itemBase;
+      const bc = i.baseCalculo !== undefined ? C(i.baseCalculo) : baseItem;
       const al = i.aliquota ?? 0;
-      const v = i.valor ?? r2((bc * al) / 100);
-      tot.vBC += bc; tot.vICMS += v;
-      return group('ICMS90', [o, tag('CST', '90'), tag('modBC', 3), tag('vBC', fmt.money(bc)), tag('pICMS', fmt.dec(al, 4)), tag('vICMS', fmt.money(v))]);
+      const v = i.valor !== undefined ? C(i.valor) : aplicarAliquota(bc, al);
+      t.vBC += bc; t.vICMS += v;
+      return group('ICMS90', [o, tag('CST', '90'), tag('modBC', 3), tag('vBC', X(bc)), tag('pICMS', fmt.dec(al, 4)), tag('vICMS', X(v))]);
     }
     default:
       throw new ValidationError(`CST de ICMS não suportado: ${(i as { cst: string }).cst}`, ['icms']);
   }
 }
 
-function pisCofinsXml(kind: 'PIS' | 'COFINS', p: PisCofins | undefined, base: number, tot: Totais): string {
+/** PIS/COFINS do item; `base` em centavos; acumula em `t`. */
+function pisCofinsXml(kind: 'PIS' | 'COFINS', p: PisCofins | undefined, base: number, t: Soma): string {
   const pct = kind === 'PIS' ? 'pPIS' : 'pCOFINS';
   const v = kind === 'PIS' ? 'vPIS' : 'vCOFINS';
-  const add = (x: number) => { if (kind === 'PIS') tot.vPIS += x; else tot.vCOFINS += x; };
+  const add = (x: number) => { if (kind === 'PIS') t.vPIS += x; else t.vCOFINS += x; };
   const cst = p?.cst ?? '49';
   if (['04', '05', '06', '07', '08', '09'].includes(cst)) return group(kind, group(`${kind}NT`, tag('CST', cst)));
   if (cst === '01' || cst === '02') {
     const pp = p as { baseCalculo?: number; aliquota: number; valor?: number };
-    const bc = pp.baseCalculo ?? base;
-    const val = pp.valor ?? r2((bc * pp.aliquota) / 100);
+    const bc = pp.baseCalculo !== undefined ? C(pp.baseCalculo) : base;
+    const val = pp.valor !== undefined ? C(pp.valor) : aplicarAliquota(bc, pp.aliquota);
     add(val);
-    return group(kind, group(`${kind}Aliq`, [tag('CST', cst), tag('vBC', fmt.money(bc)), tag(pct, fmt.dec(pp.aliquota, 4)), tag(v, fmt.money(val))]));
+    return group(kind, group(`${kind}Aliq`, [tag('CST', cst), tag('vBC', X(bc)), tag(pct, fmt.dec(pp.aliquota, 4)), tag(v, X(val))]));
   }
   const pp = (p ?? {}) as { baseCalculo?: number; aliquota?: number; valor?: number };
-  const bc = pp.baseCalculo ?? 0;
+  const bc = pp.baseCalculo !== undefined ? C(pp.baseCalculo) : 0;
   const al = pp.aliquota ?? 0;
-  const val = pp.valor ?? r2((bc * al) / 100);
+  const val = pp.valor !== undefined ? C(pp.valor) : aplicarAliquota(bc, al);
   add(val);
-  return group(kind, group(`${kind}Outr`, [tag('CST', cst), tag('vBC', fmt.money(bc)), tag(pct, fmt.dec(al, 4)), tag(v, fmt.money(val))]));
+  return group(kind, group(`${kind}Outr`, [tag('CST', cst), tag('vBC', X(bc)), tag(pct, fmt.dec(al, 4)), tag(v, X(val))]));
 }
 
+/** `troco` em centavos. */
 function pagXml(pags: Pagamento[], troco: number): string {
   const det = pags.map((p) => {
     const t = TPAG[p.tipo as keyof typeof TPAG] ?? p.tipo;
@@ -139,9 +146,9 @@ function pagXml(pags: Pagamento[], troco: number): string {
         ? [tag('tpIntegra', 1), tag('CNPJ', c.cnpjCredenciadora), tag('tBand', c.bandeira), tag('cAut', c.autorizacao)]
         : [tag('tpIntegra', 2)]);
     }
-    return group('detPag', [tag('tPag', t), t === '99' ? tag('xPag', sanitizeText(p.descricao ?? 'Outros')) : '', tag('vPag', fmt.money(p.valor)), card]);
+    return group('detPag', [tag('tPag', t), t === '99' ? tag('xPag', sanitizeText(p.descricao ?? 'Outros')) : '', tag('vPag', X(C(p.valor))), card]);
   });
-  return group('pag', [...det, troco > 0 ? tag('vTroco', fmt.money(troco)) : '']);
+  return group('pag', [...det, troco > 0 ? tag('vTroco', X(troco)) : '']);
 }
 
 /** Monta o XML (sem assinatura/QR) de uma NFC-e. A validação de negócio fica em `validarNota`. */
@@ -160,68 +167,71 @@ export function montarNfce(nota: NotaNfce, ctx: BuildContext): NfceMontada {
     cUF, emissao, offsetMinutes: ctx.offsetMinutes, cnpj: e.cnpj, serie: nota.serie, nNF: numero, tpEmis: ctx.tpEmis, cNF,
   });
 
-  const tot: Totais = { vProd: 0, vDesc: 0, vFrete: 0, vSeg: 0, vOutro: 0, vBC: 0, vICMS: 0, vICMSDeson: 0, vPIS: 0, vCOFINS: 0, vTotTrib: 0, vNF: 0 };
+  const t: Soma = { vProd: 0, vDesc: 0, vFrete: 0, vSeg: 0, vOutro: 0, vBC: 0, vICMS: 0, vPIS: 0, vCOFINS: 0, vTotTrib: 0 };
 
   const local = new Date(emissao.getTime() + ctx.offsetMinutes * 60000);
   const anoEmissao = local.getUTCFullYear();
   const dataEmissao = dhEmi.slice(0, 10);
-  const rtc = { vBC: 0, vIBSUF: 0, vIBSMun: 0, vIBS: 0, vCBS: 0, vNFTot: 0 };
+  const rtc = { vBC: 0, vIBSUF: 0, vIBSMun: 0, vIBS: 0, vCBS: 0, vNFTot: 0 }; // centavos
   let temIbsCbs = false;
 
   const dets = nota.itens.map((it: Item, idx) => {
-    const vProd = r2(it.quantidade * it.valorUnitario);
-    const vDesc = r2(it.desconto ?? 0);
-    const vFrete = r2(it.frete ?? 0), vSeg = r2(it.seguro ?? 0), vOutro = r2(it.outrasDespesas ?? 0);
-    tot.vProd += vProd; tot.vDesc += vDesc; tot.vFrete += vFrete; tot.vSeg += vSeg; tot.vOutro += vOutro;
-    const base = r2(vProd - vDesc + vFrete + vSeg + vOutro);
+    const vProd = valorDoItem(it.quantidade, it.valorUnitario);
+    const vDesc = C(it.desconto ?? 0);
+    const vFrete = C(it.frete ?? 0), vSeg = C(it.seguro ?? 0), vOutro = C(it.outrasDespesas ?? 0);
+    t.vProd += vProd; t.vDesc += vDesc; t.vFrete += vFrete; t.vSeg += vSeg; t.vOutro += vOutro;
+    const base = vProd - vDesc + vFrete + vSeg + vOutro;
     const gtin = it.gtin ? fmt.onlyDigits(it.gtin) : 'SEM GTIN';
     const xProd = idx === 0 && ctx.ambiente === 'homologacao' ? HOMOLOG_TXT : sanitizeText(it.descricao);
     const prod = group('prod', [
       tag('cProd', it.codigo), tag('cEAN', gtin), tag('xProd', xProd), tag('NCM', fmt.onlyDigits(it.ncm)), tag('CEST', it.cest),
       tag('CFOP', it.cfop), tag('uCom', it.unidade), tag('qCom', fmt.dec(it.quantidade, 4)), tag('vUnCom', fmt.dec(it.valorUnitario, 4)),
-      tag('vProd', fmt.money(vProd)), tag('cEANTrib', gtin), tag('uTrib', it.unidade), tag('qTrib', fmt.dec(it.quantidade, 4)),
+      tag('vProd', X(vProd)), tag('cEANTrib', gtin), tag('uTrib', it.unidade), tag('qTrib', fmt.dec(it.quantidade, 4)),
       tag('vUnTrib', fmt.dec(it.valorUnitario, 4)),
-      vFrete ? tag('vFrete', fmt.money(vFrete)) : '', vSeg ? tag('vSeg', fmt.money(vSeg)) : '',
-      vDesc ? tag('vDesc', fmt.money(vDesc)) : '', vOutro ? tag('vOutro', fmt.money(vOutro)) : '', tag('indTot', 1),
+      vFrete ? tag('vFrete', X(vFrete)) : '', vSeg ? tag('vSeg', X(vSeg)) : '',
+      vDesc ? tag('vDesc', X(vDesc)) : '', vOutro ? tag('vOutro', X(vOutro)) : '', tag('indTot', 1),
     ]);
-    if (it.valorTributosAprox) tot.vTotTrib += it.valorTributosAprox;
-    const antes = { vICMS: tot.vICMS, vPIS: tot.vPIS, vCOFINS: tot.vCOFINS };
-    const icms = group('ICMS', icmsXml(it.icms, base, tot));
-    const pis = pisCofinsXml('PIS', it.pis, base, tot);
-    const cofins = pisCofinsXml('COFINS', it.cofins, base, tot);
+    const vTotTribItem = it.valorTributosAprox !== undefined ? C(it.valorTributosAprox) : undefined;
+    if (vTotTribItem) t.vTotTrib += vTotTribItem;
+    const antes = { vICMS: t.vICMS, vPIS: t.vPIS, vCOFINS: t.vCOFINS };
+    const icms = group('ICMS', icmsXml(it.icms, base, t));
+    const pis = pisCofinsXml('PIS', it.pis, base, t);
+    const cofins = pisCofinsXml('COFINS', it.cofins, base, t);
     let ibsCbsXml = '';
     let vItem = '';
     if (it.ibsCbs) {
       temIbsCbs = true;
       const c = calcularIbsCbs(it.ibsCbs, {
         vProd, vDesc, vFrete, vSeg, vOutro, vFCP: 0,
-        vICMS: r2(tot.vICMS - antes.vICMS), vPIS: r2(tot.vPIS - antes.vPIS), vCOFINS: r2(tot.vCOFINS - antes.vCOFINS),
+        vICMS: t.vICMS - antes.vICMS, vPIS: t.vPIS - antes.vPIS, vCOFINS: t.vCOFINS - antes.vCOFINS,
       }, { ano: anoEmissao, data: dataEmissao }, `itens[${idx}].ibsCbs`);
       ibsCbsXml = c.xml;
       rtc.vBC += c.vBC; rtc.vIBSUF += c.vIBSUF; rtc.vIBSMun += c.vIBSMun; rtc.vIBS += c.vIBS; rtc.vCBS += c.vCBS;
       // VB01-10: vItem = vProd − vDesc + vFrete + vSeg + vOutro (+ vIBS + vCBS a partir de 2027).
-      const vi = r2(base + (somaTributosNoItem(anoEmissao) ? c.vIBS + c.vCBS : 0));
+      const vi = base + (somaTributosNoItem(anoEmissao) ? c.vIBS + c.vCBS : 0);
       rtc.vNFTot += vi;
-      vItem = tag('vItem', fmt.money(vi));
+      vItem = tag('vItem', X(vi));
     }
     const imposto = group('imposto', [
-      it.valorTributosAprox !== undefined ? tag('vTotTrib', fmt.money(it.valorTributosAprox)) : '',
+      vTotTribItem !== undefined ? tag('vTotTrib', X(vTotTribItem)) : '',
       icms, pis, cofins, ibsCbsXml,
     ]);
     return group('det', [prod, imposto, tag('infAdProd', it.informacoesAdicionais && sanitizeText(it.informacoesAdicionais)), vItem], { nItem: String(idx + 1) });
   });
 
-  for (const k of ['vProd', 'vDesc', 'vFrete', 'vSeg', 'vOutro', 'vBC', 'vICMS', 'vICMSDeson', 'vPIS', 'vCOFINS', 'vTotTrib'] as const) tot[k] = r2(tot[k]);
   if (temIbsCbs && nota.itens.some((it) => !it.ibsCbs)) {
     throw new ValidationError('Informe ibsCbs em todos os itens (ou em nenhum): o total IBSCBSTot exige consistência entre os itens.', ['itens']);
   }
-  if (temIbsCbs) {
-    for (const k of Object.keys(rtc) as (keyof typeof rtc)[]) rtc[k] = r2(rtc[k]);
-    tot.ibsCbs = rtc;
-  }
-  tot.vNF = r2(tot.vProd - tot.vDesc + tot.vFrete + tot.vSeg + tot.vOutro);
-  const pago = r2(nota.pagamentos.reduce((s, p) => s + p.valor, 0));
-  const troco = r2(pago - tot.vNF);
+  const vNF = t.vProd - t.vDesc + t.vFrete + t.vSeg + t.vOutro;
+  const pago = nota.pagamentos.reduce((s, p) => s + C(p.valor), 0);
+  const troco = pago - vNF;
+  const R = centavosParaReais;
+  const tot: Totais = {
+    vProd: R(t.vProd), vDesc: R(t.vDesc), vFrete: R(t.vFrete), vSeg: R(t.vSeg), vOutro: R(t.vOutro), vBC: R(t.vBC), vICMS: R(t.vICMS),
+    vICMSDeson: 0, vPIS: R(t.vPIS), vCOFINS: R(t.vCOFINS), vTotTrib: R(t.vTotTrib), vNF: R(vNF),
+    centavos: { vProd: t.vProd, vDesc: t.vDesc, vNF, troco: troco > 0 ? troco : 0 },
+  };
+  if (temIbsCbs) tot.ibsCbs = { vBC: R(rtc.vBC), vIBSUF: R(rtc.vIBSUF), vIBSMun: R(rtc.vIBSMun), vIBS: R(rtc.vIBS), vCBS: R(rtc.vCBS), vNFTot: R(rtc.vNFTot) };
 
   const ind = nota.indicadorPresenca ?? 1;
   const ide = group('ide', [
@@ -231,7 +241,7 @@ export function montarNfce(nota: NotaNfce, ctx: BuildContext): NfceMontada {
     // B25b-60/70: cMunFGIBS é obrigatório na NFC-e com indPres=5 e proibido nos demais casos.
     ind === 5 ? tag('cMunFGIBS', nota.municipioFatoGerador ?? e.endereco.codigoMunicipio) : '',
     tag('tpImp', 4), tag('tpEmis', ctx.tpEmis), tag('cDV', cDV), tag('tpAmb', tpAmb),
-    tag('finNFe', 1), tag('indFinal', 1), tag('indPres', ind), tag('procEmi', 0), tag('verProc', ctx.verProc ?? nota.versaoSoftware ?? 'zexon-nfce 0.3'),
+    tag('finNFe', 1), tag('indFinal', 1), tag('indPres', ind), tag('procEmi', 0), tag('verProc', ctx.verProc ?? nota.versaoSoftware ?? 'zexon-nfce 0.4'),
     ctx.tpEmis === 9 ? tag('dhCont', dhFormat(ctx.dhCont ?? emissao, ctx.offsetMinutes)) : '',
     ctx.tpEmis === 9 ? tag('xJust', sanitizeText(ctx.xJust ?? 'Contingencia off-line por indisponibilidade de comunicacao')) : '',
   ]);
@@ -264,14 +274,15 @@ export function montarNfce(nota: NotaNfce, ctx: BuildContext): NfceMontada {
     ]);
   }
 
+  const z = X(0);
   const total = group('total', group('ICMSTot', [
-    tag('vBC', fmt.money(tot.vBC)), tag('vICMS', fmt.money(tot.vICMS)), tag('vICMSDeson', fmt.money(0)), tag('vFCP', fmt.money(0)),
-    tag('vBCST', fmt.money(0)), tag('vST', fmt.money(0)), tag('vFCPST', fmt.money(0)), tag('vFCPSTRet', fmt.money(0)),
-    tag('vProd', fmt.money(tot.vProd)), tag('vFrete', fmt.money(tot.vFrete)), tag('vSeg', fmt.money(tot.vSeg)), tag('vDesc', fmt.money(tot.vDesc)),
-    tag('vII', fmt.money(0)), tag('vIPI', fmt.money(0)), tag('vIPIDevol', fmt.money(0)), tag('vPIS', fmt.money(tot.vPIS)),
-    tag('vCOFINS', fmt.money(tot.vCOFINS)), tag('vOutro', fmt.money(tot.vOutro)), tag('vNF', fmt.money(tot.vNF)),
-    tot.vTotTrib ? tag('vTotTrib', fmt.money(tot.vTotTrib)) : '',
-  ]) + (tot.ibsCbs ? totalIbsCbsXml(tot.ibsCbs) + tag('vNFTot', fmt.money(tot.ibsCbs.vNFTot)) : ''));
+    tag('vBC', X(t.vBC)), tag('vICMS', X(t.vICMS)), tag('vICMSDeson', z), tag('vFCP', z),
+    tag('vBCST', z), tag('vST', z), tag('vFCPST', z), tag('vFCPSTRet', z),
+    tag('vProd', X(t.vProd)), tag('vFrete', X(t.vFrete)), tag('vSeg', X(t.vSeg)), tag('vDesc', X(t.vDesc)),
+    tag('vII', z), tag('vIPI', z), tag('vIPIDevol', z), tag('vPIS', X(t.vPIS)),
+    tag('vCOFINS', X(t.vCOFINS)), tag('vOutro', X(t.vOutro)), tag('vNF', X(vNF)),
+    t.vTotTrib ? tag('vTotTrib', X(t.vTotTrib)) : '',
+  ]) + (temIbsCbs ? totalIbsCbsXml(rtc) + tag('vNFTot', X(rtc.vNFTot)) : ''));
 
   const rt = nota.responsavelTecnico;
   const infRespTec = rt

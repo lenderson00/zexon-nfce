@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 Lenderson Macedo — licença comercial disponível (ver COPYRIGHT.md).
 import https from 'node:https';
+import tls from 'node:tls';
 import { URL } from 'node:url';
 import { XMLParser } from 'fast-xml-parser';
 import { TransportError } from '../errors/index.js';
@@ -18,8 +19,13 @@ export const SERVICO_SOAP: Record<Servico, { ns: string; action: string }> = {
 
 export interface TransportOptions {
   timeoutMs?: number;
-  /** CAs adicionais (cadeia ICP-Brasil dos servidores SEFAZ). */
+  /** Substitui os CAs confiáveis do Node (use só se souber o que faz). Prefira `casAdicionais`. */
   ca?: string | Buffer | Array<string | Buffer>;
+  /**
+   * CAs somados aos confiáveis do Node — normalmente a cadeia ICP-Brasil dos servidores da SEFAZ
+   * (ver `carregarCadeiaIcpBrasil`).
+   */
+  casAdicionais?: Array<string | Buffer>;
   /** Padrão true. Só desative em ambientes de teste controlados. */
   rejectUnauthorized?: boolean;
   /** Substituto para testes/mocks: recebe URL e envelope, devolve corpo HTTP. */
@@ -53,7 +59,7 @@ export class SoapClient {
       this.agent = new https.Agent({
         key: this.cert?.privateKeyPem,
         cert: this.cert ? [this.cert.certPem, ...this.cert.chainPem].join('\n') : undefined,
-        ca: this.opts.ca,
+        ca: this.opts.ca ?? (this.opts.casAdicionais?.length ? [...tls.rootCertificates, ...this.opts.casAdicionais] : undefined),
         rejectUnauthorized: this.opts.rejectUnauthorized ?? true,
         keepAlive: true,
         minVersion: 'TLSv1.2',
@@ -76,6 +82,8 @@ export class SoapClient {
     const u = new URL(url);
     const timeout = this.opts.timeoutMs ?? 30000;
     return new Promise((resolve, reject) => {
+      // "conectado" = TLS estabelecido; antes disso é certo que a SEFAZ não recebeu nada.
+      let conectado = false;
       const req = https.request(
         {
           host: u.hostname, port: u.port || 443, path: u.pathname + u.search, method: 'POST', agent: this.getAgent(),
@@ -90,14 +98,36 @@ export class SoapClient {
               reject(new TransportError(`HTTP ${res.statusCode} em ${u.hostname}`));
             } else resolve(txt);
           });
+          res.on('error', (e) => reject(new TransportError(`Falha ao ler resposta de ${u.hostname}: ${e.message}`, e)));
         },
       );
+      req.on('socket', (sock) => {
+        if (!sock.connecting && (sock as tls.TLSSocket).encrypted) conectado = true; // socket reaproveitado (keep-alive)
+        else sock.once('secureConnect', () => { conectado = true; });
+      });
       req.on('timeout', () => req.destroy(new Error(`timeout após ${timeout}ms`)));
-      req.on('error', (e) => reject(new TransportError(`Falha ao conectar em ${u.hostname}: ${e.message}`, e)));
+      req.on('error', (e) => reject(erroDeTransporte(e, u.hostname, conectado)));
       req.write(envelope);
       req.end();
     });
   }
+}
+
+const ERROS_CERTIFICADO = new Set([
+  'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY', 'UNABLE_TO_GET_ISSUER_CERT', 'SELF_SIGNED_CERT_IN_CHAIN',
+  'DEPTH_ZERO_SELF_SIGNED_CERT', 'CERT_UNTRUSTED', 'CERT_HAS_EXPIRED', 'ERR_TLS_CERT_ALTNAME_INVALID',
+]);
+
+/** Converte um erro de rede em TransportError, indicando se é certo que nada chegou à SEFAZ. */
+export function erroDeTransporte(e: Error & { code?: string }, host: string, conectado: boolean): TransportError {
+  if (e.code && ERROS_CERTIFICADO.has(e.code)) {
+    return new TransportError(
+      `Não foi possível validar o certificado TLS de ${host} (${e.code}). Os servidores da SEFAZ usam a cadeia ICP-Brasil: ` +
+        'informe-a em `transporte.casAdicionais` (ex.: carregarCadeiaIcpBrasil("./certs/icp-brasil")).',
+      e, { naoRecebido: true, retentavel: false },
+    );
+  }
+  return new TransportError(`Falha ao conectar em ${host}: ${e.message}`, e, { naoRecebido: !conectado });
 }
 
 const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '@', removeNSPrefix: true, parseTagValue: false, trimValues: true });
